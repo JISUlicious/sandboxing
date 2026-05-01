@@ -32,3 +32,13 @@ class InvalidArgument(SandboxError):
 class Unauthorized(SandboxError):
     def __init__(self) -> None:
         super().__init__(401, "unauthorized", "missing or invalid token")
+
+
+class ExecTimeout(SandboxError):
+    def __init__(self) -> None:
+        super().__init__(408, "exec_timeout", "exec exceeded its wall-clock timeout")
+
+
+class InvalidPath(SandboxError):
+    def __init__(self, message: str = "path is not within /workspace") -> None:
+        super().__init__(400, "invalid_path", message)

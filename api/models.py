@@ -25,3 +25,44 @@ class SessionResponse(BaseModel):
     limits: Limits
     created_at: int
     last_activity_at: int
+
+
+# ----- exec (SPEC-201) -----
+
+
+class ExecRequest(BaseModel):
+    argv: list[str] = Field(min_length=1)
+    stdin: str | None = None
+    timeout_s: int | None = Field(default=None, ge=1)
+    env: dict[str, str] | None = None
+
+
+class ExecResponse(BaseModel):
+    stdout: str
+    stderr: str
+    exit_code: int
+    duration_ms: int
+    effective_timeout_s: int
+    truncated: bool = False
+    truncated_streams: list[str] = Field(default_factory=list)
+
+
+# ----- files (SPEC-107) -----
+
+
+class FileWriteRequest(BaseModel):
+    path: str = Field(min_length=1)
+    # Content is base64-encoded for binary safety; UTF-8 text fits too.
+    content_b64: str
+    mode: int = Field(default=0o640, ge=0, le=0o777)
+
+
+class FileEntry(BaseModel):
+    name: str
+    is_dir: bool
+    size: int
+    mode: int
+
+
+class FileListResponse(BaseModel):
+    entries: list[FileEntry]

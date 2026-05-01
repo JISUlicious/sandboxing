@@ -7,7 +7,12 @@ outside this module talks to Docker directly.
 
 from __future__ import annotations
 
+import io
 import logging
+import posixpath
+import tarfile
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import docker
@@ -17,6 +22,39 @@ from api.config import Settings
 from api.models import Limits
 
 log = logging.getLogger("sandbox.docker")
+
+# SPEC-203: per-stream output cap.
+OUTPUT_CAP_BYTES = 8 * 1024 * 1024
+# `timeout` utility convention: exit 124 when the wall-clock budget is hit.
+TIMEOUT_EXIT_CODE = 124
+
+
+@dataclass
+class ExecOutput:
+    stdout: bytes
+    stderr: bytes
+    exit_code: int
+    duration_ms: int
+    truncated_streams: list[str] = field(default_factory=list)
+
+
+def _append_capped(buf: bytearray, chunk: bytes, name: str, truncated: set[str]) -> None:
+    """Append `chunk` to `buf` until OUTPUT_CAP_BYTES; mark `name` truncated.
+
+    SPEC-203: each stream is capped *independently*; once capped, further
+    bytes are discarded but the process continues to run.
+    """
+    if name in truncated:
+        return
+    remaining = OUTPUT_CAP_BYTES - len(buf)
+    if remaining <= 0:
+        truncated.add(name)
+        return
+    if len(chunk) <= remaining:
+        buf.extend(chunk)
+    else:
+        buf.extend(chunk[:remaining])
+        truncated.add(name)
 
 
 def hardening_flags(
@@ -169,3 +207,131 @@ class DockerClient:
             self.client.containers.get(container_id).remove(force=True)
         except NotFound:
             return  # idempotent (ARCH-051 reconcile)
+
+    # ----- exec (slice 2) -----
+
+    def exec_in_container(
+        self,
+        *,
+        container_id: str,
+        argv: list[str],
+        env: dict[str, str],
+        timeout_s: int,
+    ) -> ExecOutput:
+        """Run argv inside the container with a hard wall-clock cap.
+
+        Output is collected with the SPEC-203 8 MiB per-stream cap. The
+        process keeps running until natural exit or the `timeout` utility
+        kills it; the response either way carries the truncation markers.
+        """
+        api = self.client.api
+        # SPEC-201: deterministic timeout via coreutils' `timeout` (exit 124).
+        wrapped = ["/usr/bin/timeout", "--preserve-status", str(timeout_s), *argv]
+        exec_id = api.exec_create(
+            container_id,
+            cmd=wrapped,
+            stdout=True,
+            stderr=True,
+            environment=env or {},
+            workdir="/workspace",
+            user="10001:10001",
+        )["Id"]
+
+        start_ns = time.monotonic_ns()
+        stream = api.exec_start(exec_id, detach=False, stream=True, demux=True)
+
+        stdout = bytearray()
+        stderr = bytearray()
+        truncated: set[str] = set()
+
+        for stdout_chunk, stderr_chunk in stream:
+            if stdout_chunk:
+                _append_capped(stdout, stdout_chunk, "stdout", truncated)
+            if stderr_chunk:
+                _append_capped(stderr, stderr_chunk, "stderr", truncated)
+
+        duration_ms = (time.monotonic_ns() - start_ns) // 1_000_000
+        exit_code = int(api.exec_inspect(exec_id).get("ExitCode") or 0)
+        return ExecOutput(
+            stdout=bytes(stdout),
+            stderr=bytes(stderr),
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            truncated_streams=sorted(truncated),
+        )
+
+    def _exec_simple(
+        self, container_id: str, argv: list[str], *, user: str = "10001:10001"
+    ) -> tuple[bytes, bytes, int]:
+        """Short utility exec — used by file list / delete helpers."""
+        api = self.client.api
+        exec_id = api.exec_create(
+            container_id,
+            cmd=argv,
+            stdout=True,
+            stderr=True,
+            workdir="/workspace",
+            user=user,
+        )["Id"]
+        out, err = api.exec_start(exec_id, detach=False, stream=False, demux=True)
+        exit_code = int(api.exec_inspect(exec_id).get("ExitCode") or 0)
+        return out or b"", err or b"", exit_code
+
+    # ----- files (slice 2) -----
+
+    def put_archive_file(
+        self,
+        *,
+        container_id: str,
+        abs_path: str,
+        content: bytes,
+        mode: int,
+    ) -> None:
+        """Write `content` to `abs_path` inside the container via tar stream.
+
+        Parent directories are created (mkdir -p) before the put_archive
+        call. Owner is hard-coded to UID/GID 10001 (the agent user) since
+        the container runs as that UID; otherwise files would land
+        owned by root and be unwritable.
+        """
+        parent = posixpath.dirname(abs_path)
+        name = posixpath.basename(abs_path)
+        # mkdir -p as the agent user so the dirs are owned correctly.
+        _, _, rc = self._exec_simple(container_id, ["/bin/mkdir", "-p", "--", parent])
+        if rc != 0:
+            raise RuntimeError(f"mkdir -p {parent} failed (exit {rc})")
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            info.mode = mode & 0o777
+            info.uid = 10001
+            info.gid = 10001
+            info.mtime = int(time.time())
+            tar.addfile(info, io.BytesIO(content))
+
+        self.client.api.put_archive(container_id, parent, buf.getvalue())
+
+    def get_archive_file(self, *, container_id: str, abs_path: str) -> tuple[bytes, int]:
+        """Read a single file from the container; returns (content, mode)."""
+        try:
+            stream, _ = self.client.api.get_archive(container_id, abs_path)
+        except NotFound as exc:
+            raise FileNotFoundError(abs_path) from exc
+
+        buf = io.BytesIO()
+        for chunk in stream:
+            buf.write(chunk)
+        buf.seek(0)
+        with tarfile.open(fileobj=buf, mode="r") as tar:
+            members = tar.getmembers()
+            if not members:
+                raise FileNotFoundError(abs_path)
+            member = members[0]
+            if member.isdir():
+                raise IsADirectoryError(abs_path)
+            f = tar.extractfile(member)
+            if f is None:
+                raise IsADirectoryError(abs_path)
+            return f.read(), member.mode

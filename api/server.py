@@ -10,13 +10,22 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header
+from fastapi import Depends, FastAPI, Header, Query, Response
 
 from api.audit import AuditEmitter
 from api.config import Settings, settings
 from api.docker_client import DockerClient
 from api.errors import Unauthorized
-from api.models import CreateSessionRequest, SessionResponse
+from api.exec import ExecService
+from api.files import FileService
+from api.models import (
+    CreateSessionRequest,
+    ExecRequest,
+    ExecResponse,
+    FileListResponse,
+    FileWriteRequest,
+    SessionResponse,
+)
 from api.registry import Registry, SessionRow
 from api.sessions import SessionService
 
@@ -54,6 +63,13 @@ def create_app(
 ) -> FastAPI:
     settings_ = s or settings
     service_ = service or _build_service(settings_)
+    # Slice 2: exec + files share the same registry / docker / audit.
+    exec_service_ = ExecService(
+        registry=service_.registry, docker=service_.docker, audit=service_.audit
+    )
+    file_service_ = FileService(
+        registry=service_.registry, docker=service_.docker, audit=service_.audit
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -113,6 +129,50 @@ def create_app(
     @app.delete("/v1/sessions/{session_id}", status_code=204)
     async def destroy_session(session_id: str, tenant: str = Depends(auth)) -> None:
         await service_.destroy(session_id, tenant)
+
+    # ----- exec (slice 2) -----
+
+    @app.post("/v1/sessions/{session_id}/exec", response_model=ExecResponse)
+    async def exec_session(
+        session_id: str, req: ExecRequest, tenant: str = Depends(auth)
+    ) -> ExecResponse:
+        return await exec_service_.run(session_id, tenant, req)
+
+    # ----- files (slice 2) -----
+
+    @app.post("/v1/sessions/{session_id}/files", status_code=201)
+    async def write_file(
+        session_id: str, req: FileWriteRequest, tenant: str = Depends(auth)
+    ) -> dict[str, object]:
+        return await file_service_.write(session_id, tenant, req)
+
+    @app.get("/v1/sessions/{session_id}/files", response_model=FileListResponse)
+    async def list_files(
+        session_id: str,
+        dir: str = Query(default=""),
+        tenant: str = Depends(auth),
+    ) -> FileListResponse:
+        return await file_service_.list_dir(session_id, tenant, dir)
+
+    @app.get("/v1/sessions/{session_id}/files/{path:path}")
+    async def read_file(session_id: str, path: str, tenant: str = Depends(auth)) -> Response:
+        content, mode = await file_service_.read(session_id, tenant, path)
+        # Return raw bytes so callers can handle binary content; clients
+        # that want JSON can base64 the result themselves.
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={"X-File-Mode": oct(mode)},
+        )
+
+    @app.delete("/v1/sessions/{session_id}/files/{path:path}", status_code=204)
+    async def delete_file(
+        session_id: str,
+        path: str,
+        recursive: bool = Query(default=False),
+        tenant: str = Depends(auth),
+    ) -> None:
+        await file_service_.delete(session_id, tenant, path, recursive=recursive)
 
     return app
 

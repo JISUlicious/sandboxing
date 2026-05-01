@@ -48,16 +48,6 @@ def test_exec_empty_argv_is_400(authed):
     assert r.status_code == 422  # pydantic validation rejects min_length=1
 
 
-def test_exec_stdin_not_yet_supported(authed):
-    sid = _create(authed)
-    r = authed.post(
-        f"/v1/sessions/{sid}/exec",
-        json={"argv": ["cat"], "stdin": "hi"},
-    )
-    assert r.status_code == 400
-    assert r.json()["detail"]["code"] == "invalid_argument"
-
-
 def test_exec_forbidden_env_keys_rejected(authed):
     sid = _create(authed)
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):

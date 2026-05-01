@@ -10,8 +10,10 @@ from __future__ import annotations
 import io
 import logging
 import posixpath
+import socket as _socket
 import tarfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -217,13 +219,26 @@ class DockerClient:
         argv: list[str],
         env: dict[str, str],
         timeout_s: int,
+        stdin_bytes: bytes | None = None,
     ) -> ExecOutput:
         """Run argv inside the container with a hard wall-clock cap.
 
         Output is collected with the SPEC-203 8 MiB per-stream cap. The
         process keeps running until natural exit or the `timeout` utility
         kills it; the response either way carries the truncation markers.
+
+        When `stdin_bytes` is provided, the exec is started in socket
+        mode and the input is sent before reading framed output.
         """
+        if stdin_bytes is not None:
+            return self._exec_with_stdin(
+                container_id=container_id,
+                argv=argv,
+                env=env,
+                timeout_s=timeout_s,
+                stdin_bytes=stdin_bytes,
+            )
+
         api = self.client.api
         # SPEC-201: deterministic timeout via coreutils' `timeout` (exit 124).
         wrapped = ["/usr/bin/timeout", "--preserve-status", str(timeout_s), *argv]
@@ -259,6 +274,103 @@ class DockerClient:
             duration_ms=duration_ms,
             truncated_streams=sorted(truncated),
         )
+
+    def _exec_with_stdin(
+        self,
+        *,
+        container_id: str,
+        argv: list[str],
+        env: dict[str, str],
+        timeout_s: int,
+        stdin_bytes: bytes,
+    ) -> ExecOutput:
+        """Exec with stdin via socket mode, reading docker's framed stream."""
+        from docker.utils.socket import frames_iter
+
+        api = self.client.api
+        wrapped = ["/usr/bin/timeout", "--preserve-status", str(timeout_s), *argv]
+        exec_id = api.exec_create(
+            container_id,
+            cmd=wrapped,
+            stdin=True,
+            stdout=True,
+            stderr=True,
+            environment=env or {},
+            workdir="/workspace",
+            user="10001:10001",
+        )["Id"]
+
+        start_ns = time.monotonic_ns()
+        sock = api.exec_start(exec_id, detach=False, stream=False, socket=True)
+        raw = getattr(sock, "_sock", sock)
+        try:
+            raw.sendall(stdin_bytes)
+            # Half-close the write side so the inner process sees EOF on stdin.
+            raw.shutdown(_socket.SHUT_WR)
+        except OSError:
+            # Container may have closed early; fall through to drain output.
+            pass
+
+        stdout = bytearray()
+        stderr = bytearray()
+        truncated: set[str] = set()
+        for stream_type, payload in frames_iter(sock, tty=False):
+            if not payload:
+                continue
+            if stream_type == 1:
+                _append_capped(stdout, payload, "stdout", truncated)
+            elif stream_type == 2:
+                _append_capped(stderr, payload, "stderr", truncated)
+
+        duration_ms = (time.monotonic_ns() - start_ns) // 1_000_000
+        exit_code = int(api.exec_inspect(exec_id).get("ExitCode") or 0)
+        return ExecOutput(
+            stdout=bytes(stdout),
+            stderr=bytes(stderr),
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            truncated_streams=sorted(truncated),
+        )
+
+    def exec_stream_in_container(
+        self,
+        *,
+        container_id: str,
+        argv: list[str],
+        env: dict[str, str],
+        timeout_s: int,
+    ) -> Iterator[tuple[str, bytes | int]]:
+        """Sync generator yielding live exec events.
+
+        Events:
+        - ('stdout', bytes) — chunk of stdout (raw, uncapped — caller decides).
+        - ('stderr', bytes) — chunk of stderr.
+        - ('exit', exit_code) — terminal event with the process exit code.
+
+        The caller (typically `ExecService.run_stream`) is responsible
+        for applying the SPEC-203 cap and for emitting SSE frames.
+        """
+        api = self.client.api
+        wrapped = ["/usr/bin/timeout", "--preserve-status", str(timeout_s), *argv]
+        exec_id = api.exec_create(
+            container_id,
+            cmd=wrapped,
+            stdout=True,
+            stderr=True,
+            environment=env or {},
+            workdir="/workspace",
+            user="10001:10001",
+        )["Id"]
+
+        stream = api.exec_start(exec_id, detach=False, stream=True, demux=True)
+        for stdout_chunk, stderr_chunk in stream:
+            if stdout_chunk:
+                yield ("stdout", stdout_chunk)
+            if stderr_chunk:
+                yield ("stderr", stderr_chunk)
+
+        exit_code = int(api.exec_inspect(exec_id).get("ExitCode") or 0)
+        yield ("exit", exit_code)
 
     def _exec_simple(
         self, container_id: str, argv: list[str], *, user: str = "10001:10001"

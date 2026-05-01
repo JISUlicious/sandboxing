@@ -40,6 +40,11 @@ class FakeDockerClient:
             0,
         )
 
+        # Slice 3 surface: streaming exec.
+        self.stream_exec_calls: list[dict[str, Any]] = []
+        # Each entry is the list of (event_kind, payload) tuples to yield.
+        self.stream_exec_scripts: list[list[tuple[str, Any]]] = []
+
     def health(self) -> bool:
         return True
 
@@ -95,6 +100,7 @@ class FakeDockerClient:
         argv: list[str],
         env: dict[str, str],
         timeout_s: int,
+        stdin_bytes: bytes | None = None,
     ) -> ExecOutput:
         self.exec_calls.append(
             {
@@ -102,11 +108,31 @@ class FakeDockerClient:
                 "argv": argv,
                 "env": env,
                 "timeout_s": timeout_s,
+                "stdin_bytes": stdin_bytes,
             }
         )
         if self.exec_responses:
             return self.exec_responses.pop(0)
         return ExecOutput(stdout=b"", stderr=b"", exit_code=0, duration_ms=10)
+
+    def exec_stream_in_container(
+        self,
+        *,
+        container_id: str,
+        argv: list[str],
+        env: dict[str, str],
+        timeout_s: int,
+    ) -> "Any":
+        self.stream_exec_calls.append(
+            {
+                "container_id": container_id,
+                "argv": argv,
+                "env": env,
+                "timeout_s": timeout_s,
+            }
+        )
+        script = self.stream_exec_scripts.pop(0) if self.stream_exec_scripts else [("exit", 0)]
+        yield from script
 
     def _exec_simple(
         self, container_id: str, argv: list[str], *, user: str = "10001:10001"

@@ -6,11 +6,13 @@ plus health and readiness probes.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, Query, Response
+from fastapi.responses import StreamingResponse
 
 from api.audit import AuditEmitter
 from api.config import Settings, settings
@@ -137,6 +139,25 @@ def create_app(
         session_id: str, req: ExecRequest, tenant: str = Depends(auth)
     ) -> ExecResponse:
         return await exec_service_.run(session_id, tenant, req)
+
+    @app.post("/v1/sessions/{session_id}/exec/stream")
+    async def exec_session_stream(
+        session_id: str, req: ExecRequest, tenant: str = Depends(auth)
+    ) -> StreamingResponse:
+        # Pre-flight validation runs synchronously so a bad request gets
+        # a clean 400 instead of being buried inside a half-flushed SSE.
+        exec_service_.validate_stream_request(req)
+
+        async def sse() -> AsyncIterator[bytes]:
+            async for event_type, payload in exec_service_.run_stream(session_id, tenant, req):
+                data = json.dumps(payload, separators=(",", ":"))
+                yield f"event: {event_type}\ndata: {data}\n\n".encode()
+
+        return StreamingResponse(
+            sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ----- files (slice 2) -----
 

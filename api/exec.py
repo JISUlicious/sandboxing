@@ -10,6 +10,7 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+from api import metrics
 from api.audit import AuditEmitter
 from api.docker_client import (
     TIMEOUT_EXIT_CODE,
@@ -75,6 +76,9 @@ class ExecService:
             result="timeout" if out.exit_code == TIMEOUT_EXIT_CODE else "ok",
             duration_ms=out.duration_ms,
         )
+
+        result_label = "timeout" if out.exit_code == TIMEOUT_EXIT_CODE else "ok"
+        metrics.exec_duration_seconds.labels(result=result_label).observe(out.duration_ms / 1000.0)
 
         if out.exit_code == TIMEOUT_EXIT_CODE:
             raise ExecTimeout()
@@ -207,8 +211,10 @@ class ExecService:
             raise InvalidState(f"cannot exec on session in status {session.status}")
         if session.status in ("STOPPED", "IDLE"):
             assert session.container_id is not None
+            start_ns = time.monotonic_ns()
             await asyncio.to_thread(self.docker.start_container, session.container_id)
             await self.registry.transition(session_id, "RUNNING")
+            metrics.resume_seconds.observe((time.monotonic_ns() - start_ns) / 1_000_000_000)
             session = await self.registry.get(session_id, tenant_id)
             assert session is not None
         return session

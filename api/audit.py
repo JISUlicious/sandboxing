@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from api import metrics
+
 
 class AuditEmitter:
     def __init__(self, path: Path):
@@ -44,3 +46,4 @@ class AuditEmitter:
         async with self._lock:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line)
+        metrics.audit_emit_total.labels(kind=kind).inc()

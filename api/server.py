@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, Query, Response
+from fastapi import Depends, FastAPI, Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from api import metrics
 from api.audit import AuditEmitter
 from api.config import Settings, settings
 from api.docker_client import DockerClient
@@ -28,6 +31,7 @@ from api.models import (
     FileWriteRequest,
     SessionResponse,
 )
+from api.reaper import Reaper
 from api.registry import Registry, SessionRow
 from api.sessions import SessionService
 
@@ -62,6 +66,7 @@ def create_app(
     s: Settings | None = None,
     *,
     service: SessionService | None = None,
+    start_reaper: bool = True,
 ) -> FastAPI:
     settings_ = s or settings
     service_ = service or _build_service(settings_)
@@ -72,6 +77,7 @@ def create_app(
     file_service_ = FileService(
         registry=service_.registry, docker=service_.docker, audit=service_.audit
     )
+    reaper_ = Reaper(settings=settings_, registry=service_.registry, sessions=service_)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -87,11 +93,35 @@ def create_app(
             service_.docker.ensure_network()
         else:
             log.warning("docker daemon not reachable; lifecycle calls will fail")
-        yield
+        if start_reaper:
+            await reaper_.start()
+        try:
+            yield
+        finally:
+            await reaper_.stop()
 
     app = FastAPI(title="Sandbox Service", version="0.1.0", lifespan=lifespan)
     app.state.service = service_
     app.state.settings = settings_
+    app.state.reaper = reaper_
+
+    @app.middleware("http")
+    async def metrics_middleware(request: Request, call_next):
+        start = time.monotonic()
+        response = await call_next(request)
+        # Use the templated route path to avoid label cardinality blowup
+        # from session_id/path segments. /metrics itself is excluded so
+        # scrapes don't poison the histogram.
+        route = request.scope.get("route")
+        path = getattr(route, "path", request.url.path) if route else request.url.path
+        if path != "/metrics":
+            metrics.api_requests_total.labels(
+                method=request.method, path=path, status=response.status_code
+            ).inc()
+            metrics.api_request_duration_seconds.labels(method=request.method, path=path).observe(
+                time.monotonic() - start
+            )
+        return response
 
     def auth(authorization: str | None = Header(default=None)) -> str:
         if not authorization or not authorization.startswith("Bearer "):
@@ -109,6 +139,10 @@ def create_app(
     @app.get("/readyz")
     async def readyz() -> dict[str, bool]:
         return {"docker": service_.docker.health()}
+
+    @app.get("/metrics")
+    async def metrics_endpoint() -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @app.post("/v1/sessions", response_model=SessionResponse, status_code=201)
     async def create_session(

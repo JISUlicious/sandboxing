@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 
     idle_stop_minutes: int = 15
     hard_destroy_hours: int = 24
+    reaper_interval_s: int = 60
 
     tenant_max_concurrent: int = 50
 

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from ulid import ULID
 
+from api import metrics
 from api.audit import AuditEmitter
 from api.config import Settings
 from api.docker_client import DockerClient
@@ -70,6 +72,7 @@ class SessionService:
             volume_name=volume_name,
             limits=limits,
         )
+        start_ns = time.monotonic_ns()
         try:
             await asyncio.to_thread(self.docker.create_volume, volume_name, session_id, tenant_id)
             container_id = await asyncio.to_thread(
@@ -84,6 +87,7 @@ class SessionService:
             await self.registry.transition(session_id, "RUNNING")
         except Exception:
             log.exception("create failed for %s", session_id)
+            metrics.sessions_lifecycle_total.labels(transition="create", reason="error").inc()
             # Best-effort rollback. Full reconcile lands in slice 5.
             await asyncio.to_thread(self.docker.remove_volume, volume_name)
             try:
@@ -93,6 +97,8 @@ class SessionService:
                 log.exception("rollback transition failed for %s", session_id)
             raise
 
+        metrics.session_create_seconds.observe((time.monotonic_ns() - start_ns) / 1_000_000_000)
+        metrics.sessions_lifecycle_total.labels(transition="create", reason="api").inc()
         row = await self.registry.get(session_id, tenant_id)
         assert row is not None
         await self.audit.emit(
@@ -132,8 +138,11 @@ class SessionService:
             if row.status not in ("STOPPED", "IDLE"):
                 raise InvalidState(f"cannot resume session in status {row.status}")
             assert row.container_id is not None
+            start_ns = time.monotonic_ns()
             await asyncio.to_thread(self.docker.start_container, row.container_id)
             await self.registry.transition(session_id, "RUNNING")
+            metrics.resume_seconds.observe((time.monotonic_ns() - start_ns) / 1_000_000_000)
+        metrics.sessions_lifecycle_total.labels(transition="resume", reason="api").inc()
         await self.audit.emit(kind="session.resume", tenant=tenant_id, session=session_id)
         return await self.get(session_id, tenant_id)
 
@@ -144,16 +153,56 @@ class SessionService:
             row = await self.registry.get(session_id, tenant_id)
             if row is None:
                 raise SessionNotFound()
-            await self.registry.transition(session_id, "DESTROYING")  # step 1
-            try:
-                if row.container_id:
-                    await asyncio.to_thread(
-                        self.docker.remove_container, row.container_id
-                    )  # step 2
-                await asyncio.to_thread(self.docker.remove_volume, row.volume_name)  # step 3
-            finally:
-                await self.registry.transition(session_id, "DESTROYED")  # step 4
-        await self.audit.emit(kind="session.destroy", tenant=tenant_id, session=session_id)
+            await self._destroy_locked(row, reason="api")
+
+    async def reap_stop(self, row: SessionRow, *, reason: str) -> None:
+        """Tenant-agnostic stop used by the reaper. Idempotent w.r.t. status.
+
+        Caller is the reaper; takes the per-session lock the same way the
+        public API does so an exec in flight blocks the reaper rather than
+        racing.
+        """
+        lock = await self._lock_for(row.id)
+        async with lock:
+            current = await self.registry.get_unscoped(row.id)
+            if current is None or current.status not in ("RUNNING", "IDLE"):
+                return
+            assert current.container_id is not None
+            await asyncio.to_thread(self.docker.stop_container, current.container_id)
+            await self.registry.transition(row.id, "STOPPED")
+        metrics.sessions_lifecycle_total.labels(transition="stop", reason=reason).inc()
+        await self.audit.emit(
+            kind="session.stop",
+            tenant=row.tenant_id,
+            session=row.id,
+            payload={"reason": reason},
+        )
+
+    async def reap_destroy(self, row: SessionRow, *, reason: str) -> None:
+        """Tenant-agnostic destroy used by the reaper for hard-TTL expiry."""
+        lock = await self._lock_for(row.id)
+        async with lock:
+            current = await self.registry.get_unscoped(row.id)
+            if current is None or current.status in ("DESTROYING", "DESTROYED"):
+                return
+            await self._destroy_locked(current, reason=reason)
+
+    async def _destroy_locked(self, row: SessionRow, *, reason: str) -> None:
+        """Shared destroy body assuming the per-session lock is already held."""
+        await self.registry.transition(row.id, "DESTROYING")  # step 1
+        try:
+            if row.container_id:
+                await asyncio.to_thread(self.docker.remove_container, row.container_id)  # step 2
+            await asyncio.to_thread(self.docker.remove_volume, row.volume_name)  # step 3
+        finally:
+            await self.registry.transition(row.id, "DESTROYED")  # step 4
+        metrics.sessions_lifecycle_total.labels(transition="destroy", reason=reason).inc()
+        await self.audit.emit(
+            kind="session.destroy",
+            tenant=row.tenant_id,
+            session=row.id,
+            payload={"reason": reason},
+        )
 
     # ----- helpers -----
 

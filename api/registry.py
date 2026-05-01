@@ -153,6 +153,15 @@ class Registry:
                 )
             await db.commit()
 
+    async def get_unscoped(self, session_id: str) -> SessionRow | None:
+        """Tenant-agnostic lookup used by the reaper. Returns DESTROYED rows
+        too — the reaper consults `status` itself."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+            row = await cur.fetchone()
+            return _row_to_session(row) if row else None
+
     async def get(self, session_id: str, tenant_id: str) -> SessionRow | None:
         """Returns None if not found, not owned, or DESTROYED (SPEC-200)."""
         async with aiosqlite.connect(self.db_path) as db:
@@ -186,3 +195,35 @@ class Registry:
             )
             row = await cur.fetchone()
             return int(row["n"]) if row else 0
+
+    async def list_idle_running(self, idle_threshold_ms: int) -> Sequence[SessionRow]:
+        """Sessions in RUNNING/IDLE that haven't seen activity since the threshold."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM sessions "
+                "WHERE status IN ('RUNNING', 'IDLE') AND last_activity_at < ?",
+                (idle_threshold_ms,),
+            )
+            rows = await cur.fetchall()
+            return [_row_to_session(r) for r in rows]
+
+    async def list_expired(self, ttl_threshold_ms: int) -> Sequence[SessionRow]:
+        """Sessions older than the hard-destroy TTL, excluding terminal states."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM sessions "
+                "WHERE status NOT IN ('DESTROYING', 'DESTROYED') AND created_at < ?",
+                (ttl_threshold_ms,),
+            )
+            rows = await cur.fetchall()
+            return [_row_to_session(r) for r in rows]
+
+    async def status_counts(self) -> dict[str, int]:
+        """Aggregate counts by status — used by the metrics gauge."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT status, COUNT(*) AS n FROM sessions GROUP BY status")
+            rows = await cur.fetchall()
+            return {row["status"]: int(row["n"]) for row in rows}

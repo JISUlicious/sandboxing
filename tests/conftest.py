@@ -193,7 +193,9 @@ def service(settings, fake_docker) -> SessionService:
 
 @pytest.fixture
 def client(settings, service):
-    app = create_app(settings, service=service)
+    # start_reaper=False keeps the test loop deterministic; reaper tests
+    # invoke tick() directly via the `app.state.reaper` handle.
+    app = create_app(settings, service=service, start_reaper=False)
     with TestClient(app) as c:
         yield c
 

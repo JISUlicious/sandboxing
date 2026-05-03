@@ -50,13 +50,15 @@ if ! iptables -L "$CHAIN" -n >/dev/null 2>&1; then
 fi
 
 # Remove any rules previously inserted with our tag (idempotency).
-iptables -S "$CHAIN" \
-    | grep -F -- "--comment $TAG" \
-    | sed 's/^-A /-D /' \
-    | while read -r rule; do
+# `|| true` swallows grep's exit-1-on-no-matches under `set -o pipefail`
+# so a clean first run doesn't abort the script before adding rules.
+existing=$(iptables -S "$CHAIN" | grep -F -- "--comment $TAG" || true)
+if [[ -n "$existing" ]]; then
+    while read -r rule; do
         # shellcheck disable=SC2086
         iptables $rule || true
-    done
+    done < <(printf '%s\n' "$existing" | sed 's/^-A /-D /')
+fi
 
 # Append in order. Append, not insert: the chain is otherwise managed
 # by Docker, and prepending would conflict with rules Docker inserts.

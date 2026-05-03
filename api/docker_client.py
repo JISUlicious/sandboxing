@@ -80,6 +80,7 @@ def hardening_flags(
     image: str,
     network: str,
     dev_mode: bool,
+    proxy_url: str = "http://proxy:3128",
 ) -> dict[str, Any]:
     """Canonical hardening kwargs for `containers.create`. ARCH-021."""
     flags: dict[str, Any] = {
@@ -105,8 +106,8 @@ def hardening_flags(
         "nano_cpus": limits.vcpu * 1_000_000_000,
         "network": network,
         "environment": {
-            "HTTPS_PROXY": "http://proxy:3128",
-            "HTTP_PROXY": "http://proxy:3128",
+            "HTTPS_PROXY": proxy_url,
+            "HTTP_PROXY": proxy_url,
             "NO_PROXY": "",
             "HOME": "/workspace",
             "USER": "agent",
@@ -203,6 +204,7 @@ class DockerClient:
             image=self._settings.sandbox_image,
             network=self._settings.network_name,
             dev_mode=self._settings.dev_mode,
+            proxy_url=self._settings.egress_proxy_url,
         )
         container = self.client.containers.create(**flags)
         return container.id

@@ -18,6 +18,10 @@ class Settings(BaseSettings):
 
     sandbox_image: str = "sandbox-runtime:latest"
     network_name: str = "sandbox_egress"
+    # Proxy URL injected as HTTP(S)_PROXY into every sandbox. Use an IP
+    # if you're on a runtime where Docker's embedded DNS can't be
+    # reached from inside the sandbox (e.g., some gVisor versions).
+    egress_proxy_url: str = "http://proxy:3128"
 
     default_vcpu: int = 2
     default_memory_mib: int = 2048

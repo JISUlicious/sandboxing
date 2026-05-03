@@ -72,6 +72,7 @@ class FileService:
     async def write(
         self, session_id: str, tenant_id: str, req: FileWriteRequest
     ) -> dict[str, object]:
+        self.audit.precheck()
         session = await self._require_running(session_id, tenant_id)
         abs_path = resolve_workspace_path(req.path)
         try:
@@ -168,6 +169,7 @@ class FileService:
         *,
         recursive: bool,
     ) -> None:
+        self.audit.precheck()
         session = await self._require_running(session_id, tenant_id)
         # SPEC-107: /workspace itself cannot be deleted.
         abs_path = resolve_workspace_path(rel_path)

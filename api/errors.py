@@ -42,3 +42,15 @@ class ExecTimeout(SandboxError):
 class InvalidPath(SandboxError):
     def __init__(self, message: str = "path is not within /workspace") -> None:
         super().__init__(400, "invalid_path", message)
+
+
+class AuditUnhealthy(SandboxError):
+    """Returned when the audit log is failing and we're refusing to add
+    new mutations until it's reconciled. ARCH §7 fail-closed."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            503,
+            "audit_unhealthy",
+            "audit log is unhealthy; refusing new mutations until reconciled",
+        )

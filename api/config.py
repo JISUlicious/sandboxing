@@ -13,6 +13,8 @@ class Settings(BaseSettings):
 
     db_path: Path = Path("./var/sandbox.db")
     audit_log_path: Path = Path("./var/audit.log")
+    audit_fallback_log_path: Path | None = None  # default: <audit_log>.fallback.jsonl
+    audit_buffer_timeout_s: float = 5.0  # ARCH §7
 
     sandbox_image: str = "sandbox-runtime:latest"
     network_name: str = "sandbox_egress"

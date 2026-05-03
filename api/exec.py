@@ -48,6 +48,7 @@ class ExecService:
     # ----- non-streaming -----
 
     async def run(self, session_id: str, tenant_id: str, req: ExecRequest) -> ExecResponse:
+        self.audit.precheck()
         session = await self._prepare(session_id, tenant_id, req)
         timeout_s = self._effective_timeout(req, session)
         env = req.env or {}
@@ -113,6 +114,7 @@ class ExecService:
         stdin on the synchronous /exec is fine.
         """
         self.validate_stream_request(req)
+        self.audit.precheck()
         session = await self._prepare(session_id, tenant_id, req)
         timeout_s = self._effective_timeout(req, session)
         env = req.env or {}

@@ -7,10 +7,10 @@ def test_health_no_auth(client):
     assert r.json() == {"status": "ok"}
 
 
-def test_readyz_reports_docker(client):
+def test_readyz_reports_docker_and_audit(client):
     r = client.get("/readyz")
     assert r.status_code == 200
-    assert r.json() == {"docker": True}
+    assert r.json() == {"docker": True, "audit": True}
 
 
 def test_create_requires_auth(client):

@@ -125,7 +125,11 @@ def _build_service(s: Settings) -> SessionService:
         settings=s,
         registry=Registry(s.db_path),
         docker=DockerClient(s),
-        audit=AuditEmitter(s.audit_log_path),
+        audit=AuditEmitter(
+            s.audit_log_path,
+            fallback_path=s.audit_fallback_log_path,
+            buffer_timeout_s=s.audit_buffer_timeout_s,
+        ),
     )
 
 
@@ -234,12 +238,17 @@ def create_app(
         tags=["Operations"],
         summary="Readiness probe",
         description=(
-            "Returns `{docker: true}` once the daemon is reachable. Use as "
-            "a load-balancer / orchestrator readiness check."
+            "Returns the health of subsystems the API needs to serve "
+            "mutations: `docker` for the daemon, `audit` for the "
+            "fail-closed audit log (ARCH §7). All-true means the service "
+            "will accept new lifecycle / exec / file calls."
         ),
     )
     async def readyz() -> dict[str, bool]:
-        return {"docker": service_.docker.health()}
+        return {
+            "docker": service_.docker.health(),
+            "audit": service_.audit.is_healthy,
+        }
 
     @app.get(
         "/metrics",

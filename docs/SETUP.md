@@ -310,11 +310,232 @@ sudo systemctl enable --now sandbox-image-warm
 - [ ] `/metrics` scraping restricted to internal network.
 - [ ] `sandbox-runtime:latest` pre-pulled at boot.
 - [ ] Audit log directory writable by `sandbox` user, rotated daily.
+- [ ] `/etc/sandbox/env` mode `0640`, owned `root:sandbox`.
+
+---
+
+## Validation: smoke tests for production posture
+
+Run these against a freshly-started service to prove each layer of
+hardening is actually in effect (not just configured).
+
+```bash
+TOKEN=$(sudo grep API_TOKEN /etc/sandbox/env | cut -d= -f2)
+SID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+        -H 'Content-Type: application/json' \
+        -d '{}' http://127.0.0.1:8000/v1/sessions | jq -r .session_id)
+CID=$(docker ps -q --filter "label=sandbox.session_id=$SID")
+
+# --- Hardening flags actually applied (ARCH-021) ---
+docker inspect "$CID" --format '{{.HostConfig.Runtime}}'        # runsc
+docker inspect "$CID" --format '{{.HostConfig.UsernsMode}}'     # empty (daemon default)
+docker inspect "$CID" --format '{{.HostConfig.ReadonlyRootfs}}' # true
+docker inspect "$CID" --format '{{.HostConfig.CapDrop}}'        # [ALL]
+
+# --- gVisor actually intercepting (not just registered) ---
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"argv":["cat","/proc/version"]}' \
+    http://127.0.0.1:8000/v1/sessions/$SID/exec | jq -r .stdout
+# Expect a line mentioning "gVisor" or "Sentry". Plain "Linux ... x86_64"
+# means the daemon used runc — runsc isn't actually being applied.
+
+# --- Non-root + read-only rootfs ---
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"argv":["id"]}' http://127.0.0.1:8000/v1/sessions/$SID/exec | jq -r .stdout
+# uid=10001(agent) gid=10001(agent)
+
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"argv":["bash","-c","touch /escape 2>&1; echo EXIT:$?"]}' \
+    http://127.0.0.1:8000/v1/sessions/$SID/exec | jq -r .stdout
+# "Read-only file system" + "EXIT:1"
+
+# --- userns-remap mapping container UID 10001 to a host subuid ---
+ps -eo uid,pid,cmd | grep "$CID" | head -3
+# Process owner should NOT be uid=10001 on the host. With
+# userns-remap=default it'll be in the dockremap subuid range
+# (typically starting at 165536 or similar).
+
+# --- /metrics serves Prometheus ---
+curl -s http://127.0.0.1:8000/metrics | grep -c '^sandbox_'
+# Expect 30+ sandbox_* series.
+
+# --- Cleanup ---
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
+    http://127.0.0.1:8000/v1/sessions/$SID
+```
+
+If any of those don't match, check the corresponding pitfall below.
+
+---
+
+## State management: backup, restore, teardown
+
+The service has four pieces of on-disk state:
+
+| Path | What it is | Replaceable? |
+|---|---|---|
+| `/var/lib/sandbox-fs.img` | XFS loopback file (mounted at `/var/lib/sandbox-volumes`) | No — losing it loses every session's `/workspace` |
+| `/var/lib/sandbox-volumes/<vol>/_data/` | Per-session workspace contents | Per-session; survives container stop/restart |
+| `/var/lib/sandbox/sandbox.db` | SQLite registry — source of truth for session→container/volume mapping | No — losing it orphans containers and volumes |
+| `/var/log/sandbox/audit.log*` | Append-only JSONL audit | Yes — historical only; service runs without it |
+
+### Backup
+
+Take a consistent snapshot when traffic is quiet (or briefly stop the
+service):
+
+```bash
+sudo systemctl stop sandbox-api      # ~5 s grace; in-flight calls drain
+
+BACKUP=/path/to/backup-$(date +%Y%m%d-%H%M%S)
+sudo mkdir -p "$BACKUP"
+
+# Registry — use sqlite3 .backup for a consistent copy. Plain `cp` of
+# a live SQLite file is safe only if the service is stopped.
+sudo sqlite3 /var/lib/sandbox/sandbox.db ".backup '$BACKUP/sandbox.db'"
+
+# Audit log (rotation-friendly: copy all rotated files too).
+sudo cp -a /var/log/sandbox/audit.log* "$BACKUP/" 2>/dev/null || true
+
+# Volume area — block-level copy of the loopback file is fastest and
+# captures every session volume in one shot. Unmount first for a
+# clean image.
+sudo umount /var/lib/sandbox-volumes
+sudo cp --sparse=always /var/lib/sandbox-fs.img "$BACKUP/sandbox-fs.img"
+sudo mount /var/lib/sandbox-volumes
+
+sudo systemctl start sandbox-api
+```
+
+Per-session backup (e.g., to ship a single agent's workspace
+elsewhere) — the volume mount path is exposed by Docker:
+
+```bash
+VOL=$(docker volume inspect sandbox-vol-<session-id> -f '{{.Mountpoint}}')
+sudo tar -C "$VOL" -czf /path/to/session.tgz .
+```
+
+### Restore
+
+```bash
+sudo systemctl stop sandbox-api
+
+# Loopback file: copy back, then mount.
+sudo umount /var/lib/sandbox-volumes 2>/dev/null || true
+sudo cp --sparse=always "$BACKUP/sandbox-fs.img" /var/lib/sandbox-fs.img
+sudo mount /var/lib/sandbox-volumes
+
+# Registry + audit.
+sudo cp "$BACKUP/sandbox.db" /var/lib/sandbox/sandbox.db
+sudo cp "$BACKUP"/audit.log* /var/log/sandbox/ 2>/dev/null || true
+sudo chown -R sandbox:sandbox /var/lib/sandbox /var/log/sandbox
+
+# Containers from the previous lifetime are gone, but the registry
+# still references their container_ids. The control plane does NOT
+# yet auto-reconcile on startup (ARCH-051's reconcile step is
+# deferred). Run the cleanup pass below before serving traffic.
+sudo systemctl start sandbox-api
+```
+
+**Post-restore cleanup.** Volumes survived; container_ids didn't. Mark
+every non-terminal row STOPPED so the next exec / resume call returns a
+clean error rather than NotFound from docker-py:
+
+```bash
+sudo sqlite3 /var/lib/sandbox/sandbox.db <<'SQL'
+UPDATE sessions
+   SET status = 'STOPPED'
+ WHERE status IN ('CREATING', 'RUNNING', 'IDLE');
+SQL
+```
+
+For each session you want to keep, the workspace volume is intact at
+`/var/lib/sandbox-volumes/sandbox-vol-<session-id>/_data/`. Easiest
+recovery flow: create a fresh session and `tar`-restore the workspace
+into it, then destroy the orphaned row. Sessions you don't care about
+will be hard-destroyed by the reaper at the 24 h TTL.
+
+### Resize the loopback volume area
+
+The loopback file can grow online (XFS shrink is unsupported):
+
+```bash
+# Bump the file size (sparse — no actual writes yet).
+sudo truncate -s 50G /var/lib/sandbox-fs.img
+# OR: sudo fallocate -l 50G /var/lib/sandbox-fs.img to fully reserve.
+
+# Re-read the loop device size.
+LOOPDEV=$(losetup -j /var/lib/sandbox-fs.img | cut -d: -f1)
+sudo losetup -c "$LOOPDEV"
+
+# Grow the XFS to fill the new device size.
+sudo xfs_growfs /var/lib/sandbox-volumes
+df -h /var/lib/sandbox-volumes
+```
+
+### Manually clean a single session (when reaper is broken)
+
+```bash
+SID=01KQP6XG1GFD4GR9PF712X2KEW
+docker rm -f "sandbox-$SID" 2>/dev/null || true
+docker volume rm "sandbox-vol-$SID" 2>/dev/null || true
+sudo sqlite3 /var/lib/sandbox/sandbox.db \
+    "UPDATE sessions SET status='DESTROYED', destroyed_at=$(date +%s%3N) WHERE id='$SID';"
+```
+
+### Remove the entire installation
+
+In order:
+
+```bash
+sudo systemctl disable --now sandbox-api sandbox-image-warm
+sudo rm -f /etc/systemd/system/sandbox-api.service \
+           /etc/systemd/system/sandbox-image-warm.service
+sudo systemctl daemon-reload
+
+# Remove all sandbox containers + volumes.
+docker rm -f $(docker ps -aq --filter 'label=sandbox.managed=true' \
+                                --filter 'label=sandbox.session_id') 2>/dev/null
+docker volume rm $(docker volume ls -q --filter 'label=sandbox.managed=true' \
+                                       --filter 'name=sandbox-vol-') 2>/dev/null
+
+# Remove the network and the runtime image.
+docker network rm sandbox_egress 2>/dev/null || true
+docker image rm sandbox-runtime:latest 2>/dev/null || true
+
+# Tear down the loopback volume area.
+sudo umount /var/lib/sandbox-volumes
+sudo sed -i '/sandbox-fs.img/d' /etc/fstab
+sudo rm -rf /var/lib/sandbox-fs.img /var/lib/sandbox-volumes
+
+# Wipe registry / audit / config / installation root.
+sudo rm -rf /var/lib/sandbox /var/log/sandbox /etc/sandbox /opt/sandbox
+sudo userdel sandbox 2>/dev/null || true
+
+# Optional: uninstall gVisor + Docker if no other services use them.
+sudo apt-get remove -y runsc                  # or: sudo dnf remove -y runsc
+# Leave Docker alone unless you're sure nothing else uses it.
+```
 
 ---
 
 ## Common pitfalls
 
+- **`mkfs.xfs: command not found`:** `xfsprogs` isn't installed.
+  - Ubuntu/Debian: `sudo apt-get install -y xfsprogs`
+  - Rocky/RHEL: `sudo dnf install -y xfsprogs`
+- **`docker images` shows nothing after a build that "succeeded":**
+  the build failed silently — re-run with `; echo "exit=$?"` appended,
+  or check that you're talking to the right daemon
+  (`docker context ls`, `docker version`).
+- **`/proc/version` doesn't mention gVisor inside a session:** runsc
+  is registered but not actually being used. Causes:
+  1. `daemon.json` not picked up — `sudo systemctl restart docker`.
+  2. The control plane is running with `SANDBOX_DEV_MODE=1`, which
+     strips `runtime=runsc` from the hardening flags. Drop it from
+     `/etc/sandbox/env` and restart `sandbox-api`.
+  3. Manual `docker run` without `--runtime=runsc` won't show gVisor;
+     verify by going through the API.
 - **`--runtime=runsc` errors "no such file":** runsc not on Docker's
   PATH. Use the absolute path in `daemon.json`.
 - **gVisor + KVM fails with "no /dev/kvm":** nested virtualization not
@@ -325,3 +546,7 @@ sudo systemctl enable --now sandbox-image-warm
 - **`DOCKER-USER` chain doesn't exist** on a fresh install: it appears
   after Docker's first start and after the first `iptables` lookup that
   references it. Restart Docker if `iptables -L DOCKER-USER` errors.
+- **Loopback volume "device or resource busy" on umount:** something is
+  still using the mount. `sudo lsof +D /var/lib/sandbox-volumes` to
+  find it; usually a leftover session container — `docker rm -f` it
+  first.

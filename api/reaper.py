@@ -76,7 +76,16 @@ class Reaper:
         log.info("reaper stopped")
 
     async def tick(self) -> None:
-        """One reaper sweep: idle-stop, hard-destroy, refresh status gauge."""
+        """One reaper sweep: idle-stop, hard-destroy, refresh status gauge,
+        and let the audit emitter try to recover / flush its buffer."""
+        # Audit maintenance first — if audit is unhealthy, reap_* calls
+        # will fail their precheck. Recovering it here means the next
+        # tick can actually do work.
+        try:
+            await self._sessions.audit.maintenance_tick()
+        except Exception:
+            log.exception("audit maintenance tick crashed")
+
         now_ms = int(time.time() * 1000)
         idle_ms = self._settings.idle_stop_minutes * 60 * 1000
         ttl_ms = self._settings.hard_destroy_hours * 60 * 60 * 1000

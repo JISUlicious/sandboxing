@@ -56,6 +56,7 @@ class SessionService:
     # ----- public API -----
 
     async def create(self, tenant_id: str, limits: Limits | None) -> SessionRow:
+        self.audit.precheck()
         n = await self.registry.count_concurrent(tenant_id)
         if n >= self.settings.tenant_max_concurrent:
             raise LimitExceeded(
@@ -116,6 +117,7 @@ class SessionService:
         return row
 
     async def stop(self, session_id: str, tenant_id: str) -> SessionRow:
+        self.audit.precheck()
         lock = await self._lock_for(session_id)
         async with lock:
             row = await self.registry.get(session_id, tenant_id)
@@ -130,6 +132,7 @@ class SessionService:
         return await self.get(session_id, tenant_id)
 
     async def resume(self, session_id: str, tenant_id: str) -> SessionRow:
+        self.audit.precheck()
         lock = await self._lock_for(session_id)
         async with lock:
             row = await self.registry.get(session_id, tenant_id)
@@ -148,6 +151,7 @@ class SessionService:
 
     async def destroy(self, session_id: str, tenant_id: str) -> None:
         """Multi-step destroy ordering per ARCH-051."""
+        self.audit.precheck()
         lock = await self._lock_for(session_id)
         async with lock:
             row = await self.registry.get(session_id, tenant_id)

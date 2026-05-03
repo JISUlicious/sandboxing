@@ -1,0 +1,28 @@
+# Sandbox egress allowlist. One pattern per line. # for comments.
+#
+# Patterns are squid `dstdomain` matches:
+#   - `example.com`   matches exactly example.com
+#   - `.example.com`  matches example.com AND any subdomain (foo.example.com etc.)
+#
+# Default content below covers the common agent install paths
+# (pip, npm, git clone from GitHub). Edit to fit your workload.
+# An EMPTY file means "deny everything" — use that as the locked-down
+# production default and only allow what your agent actually needs.
+
+# --- Python packaging ---
+.pypi.org
+.pythonhosted.org
+
+# --- Node packaging ---
+.npmjs.org
+registry.npmjs.org
+
+# --- Git / GitHub ---
+.github.com
+github.com
+.githubusercontent.com
+codeload.github.com
+
+# --- General trust roots ---
+.python.org
+.debian.org

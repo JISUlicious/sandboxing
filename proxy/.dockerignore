@@ -1,0 +1,4 @@
+*
+!Dockerfile
+!squid.conf
+!allowed-domains.txt

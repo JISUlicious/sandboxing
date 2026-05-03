@@ -202,17 +202,50 @@ sudo tune2fs -O quota -Q prjquota /dev/<root-or-data-fs>
 **No quota at all** (small deployments): keep advisory mode and stay in
 `SANDBOX_DEV_MODE=1`. SPEC-302 documents this as not-production.
 
-### 5 · Egress proxy + iptables — slice 5 (pending)
+### 5 · Egress proxy + iptables
 
-When slice 5 lands the repo will ship:
+The repo ships:
 
-- `proxy/Dockerfile` and config templates for the Squid container.
-- `deploy/iptables-setup.sh` — idempotent rules added to the
-  **`DOCKER-USER`** chain so Docker's restart doesn't wipe them.
+- `proxy/Dockerfile` + `proxy/squid.conf` + `proxy/allowed-domains.txt`
+  for the Squid container.
+- `deploy/iptables-setup.sh` + `deploy/sandbox-iptables.service` —
+  idempotent rules added to the **`DOCKER-USER`** chain so Docker's
+  restart doesn't wipe them.
 
-Until then: run with `SANDBOX_DEV_MODE=1` even in production. The rest
-of the hardening (gVisor, userns-remap, non-root UID, read-only rootfs,
-cap-drop, seccomp via runsc, XFS quota) is already wired and active.
+Pre-create the bridge with the pinned subnet, then run the proxy on
+the fixed IP:
+
+```bash
+docker network create --subnet=172.30.0.0/24 \
+    --label sandbox.managed=true sandbox_egress
+
+docker build -t sandbox-proxy:latest /opt/sandbox/proxy/
+docker run -d --name proxy --restart=unless-stopped \
+    --network sandbox_egress --ip=172.30.0.2 \
+    -v /opt/sandbox/proxy/allowed-domains.txt:/etc/squid/allowed-domains.txt:ro \
+    sandbox-proxy:latest
+
+sudo /opt/sandbox/deploy/iptables-setup.sh
+sudo cp /opt/sandbox/deploy/sandbox-iptables.service \
+       /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sandbox-iptables
+```
+
+Edit `proxy/allowed-domains.txt` for your workload. `pip` / `npm` /
+`git` defaults are present; **the leading-dot form (`*.example.com`)
+matches subdomains only**, the no-dot form covers both the bare
+domain and subdomains. Squid 6 refuses to start if you list both for
+the same domain.
+
+**Set the proxy URL on the control plane** so sandboxes use the
+proxy's IP rather than the hostname (Docker's embedded DNS isn't
+always reachable from inside gVisor's netstack):
+
+```ini
+# in /etc/sandbox/env
+SANDBOX_EGRESS_PROXY_URL=http://172.30.0.2:3128
+```
 
 ### 6 · Control plane as a systemd service
 
@@ -234,9 +267,35 @@ SANDBOX_BIND_PORT=8000
 SANDBOX_DB_PATH=/var/lib/sandbox/sandbox.db
 SANDBOX_AUDIT_LOG_PATH=/var/log/sandbox/audit.log
 SANDBOX_SANDBOX_IMAGE=sandbox-runtime:latest
-# Drop SANDBOX_DEV_MODE once slice 5 ships.
-SANDBOX_DEV_MODE=1
+SANDBOX_EGRESS_PROXY_URL=http://172.30.0.2:3128
+SANDBOX_QUOTA_SETUP_CMD=/opt/sandbox/deploy/xfs-quota-setup.sh
+SANDBOX_QUOTA_TEARDOWN_CMD=/opt/sandbox/deploy/xfs-quota-teardown.sh
+SANDBOX_QUOTA_VOLUME_BASE=/var/lib/sandbox-volumes
+# SANDBOX_DEV_MODE intentionally absent — production posture.
 ```
+
+Wire the quota scripts (copy from `.example`, drop the suffix):
+
+```bash
+sudo cp /opt/sandbox/deploy/xfs-quota-setup.sh.example \
+       /opt/sandbox/deploy/xfs-quota-setup.sh
+sudo cp /opt/sandbox/deploy/xfs-quota-teardown.sh.example \
+       /opt/sandbox/deploy/xfs-quota-teardown.sh
+sudo chmod +x /opt/sandbox/deploy/xfs-quota-{setup,teardown}.sh
+
+# The scripts use sudo to run xfs_quota and edit /etc/projects.
+# Add a sudoers entry for the sandbox user:
+echo "sandbox ALL=(root) NOPASSWD: /usr/sbin/xfs_quota, /usr/bin/sed, /usr/bin/tee, /usr/bin/touch" \
+    | sudo tee /etc/sudoers.d/sandbox-xfs-quota
+sudo chmod 0440 /etc/sudoers.d/sandbox-xfs-quota
+```
+
+The Docker volume layout differs from the default in production: when
+`quota_volume_base` is set, the control plane creates each session's
+volume as a bind mount onto `$volume_base/<session_id>` (mode `0777`
+so container UID 10001 can write through). That's what makes the XFS
+project quota actually apply — Docker's default `/var/lib/docker/volumes`
+location is usually on a non-prjquota filesystem.
 
 `/etc/systemd/system/sandbox-api.service`:
 
@@ -359,9 +418,42 @@ ps -eo uid,pid,cmd | grep "$CID" | head -3
 curl -s http://127.0.0.1:8000/metrics | grep -c '^sandbox_'
 # Expect 30+ sandbox_* series.
 
+# --- Egress: blocked domain (SPEC-403) ---
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"argv":["curl","-sS","-o","/dev/null","-w","HTTP=%{http_code}\n","-m","10","https://example.com"]}' \
+    http://127.0.0.1:8000/v1/sessions/$SID/exec | jq '{stdout, exit_code}'
+# Expect: stdout="HTTP=000", exit_code=56 (curl reports CONNECT-tunnel-failed
+# when Squid responds 403 to the proxy CONNECT — HTTPS tunnel never forms,
+# so %{http_code} stays 000). That's the success signal here.
+
+# --- Egress: allowed domain (SPEC-403) ---
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"argv":["curl","-sS","-o","/dev/null","-w","HTTP=%{http_code}\n","-m","10","https://pypi.org"]}' \
+    http://127.0.0.1:8000/v1/sessions/$SID/exec | jq '{stdout, exit_code}'
+# Expect: stdout="HTTP=200", exit_code=0.
+
+# --- Sandbox-to-sandbox blocked at iptables (SPEC-402) ---
+SID2=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+        -d '{}' http://127.0.0.1:8000/v1/sessions | jq -r .session_id)
+SID2_IP=$(docker inspect "sandbox-$SID2" \
+    -f '{{ (index .NetworkSettings.Networks "sandbox_egress").IPAddress }}')
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"argv\":[\"timeout\",\"3\",\"bash\",\"-c\",\"echo > /dev/tcp/$SID2_IP/22 2>&1; echo EXIT:\$?\"]}" \
+    http://127.0.0.1:8000/v1/sessions/$SID/exec | jq -r .stdout
+# Expect: "EXIT:1" (or 124) — connection dropped by DOCKER-USER rule.
+
+# --- Workspace quota cap (SPEC-302) ---
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"argv":["bash","-c","dd if=/dev/zero of=/workspace/big bs=1M count=2048 2>&1; echo DD_EXIT:${PIPESTATUS[0]}"]}' \
+    http://127.0.0.1:8000/v1/sessions/$SID/exec | jq -r .stdout
+# Expect: "dd: error writing '/workspace/big': No space left on device"
+# at ~1024 MiB written, with DD_EXIT:1.
+
 # --- Cleanup ---
 curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
     http://127.0.0.1:8000/v1/sessions/$SID
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
+    http://127.0.0.1:8000/v1/sessions/$SID2
 ```
 
 If any of those don't match, check the corresponding pitfall below.
@@ -550,3 +642,27 @@ sudo apt-get remove -y runsc                  # or: sudo dnf remove -y runsc
   still using the mount. `sudo lsof +D /var/lib/sandbox-volumes` to
   find it; usually a leftover session container — `docker rm -f` it
   first.
+- **`curl ... exit 5 "could not resolve proxy"` from inside a sandbox:**
+  Docker's embedded DNS (127.0.0.11) isn't reachable from gVisor's
+  netstack on some `runsc` versions. Set
+  `SANDBOX_EGRESS_PROXY_URL=http://172.30.0.2:3128` in `/etc/sandbox/env`
+  to bypass DNS. Existing sessions keep the old env (it's baked at
+  container-create time) — destroy and recreate them.
+- **`dd if=/dev/zero of=/workspace/big ...` writes past the workspace
+  cap:** The XFS project quota's userspace registration is missing.
+  Check `sudo xfs_quota -x -c "report -p" /var/lib/sandbox-volumes` —
+  if your session's project ID has `Hard=0`, the script's `limit`
+  call silently no-oped. The hardened `xfs-quota-setup.sh` writes to
+  `/etc/projects` and runs `project -s` + `limit` in one xfs_quota
+  invocation to avoid this; older deployments need the new version.
+  Confirm the Docker volume is bind-mounted to your XFS dir:
+  `docker volume inspect sandbox-vol-<SID> -f '{{.Options}}'` should
+  show `o:bind type:none`.
+- **`dd | tail -3; echo EXIT:$?` shows `EXIT:0` even when dd fails:**
+  bash reports the exit of `tail`, not `dd`. Use
+  `${PIPESTATUS[0]}` instead: `dd … 2>&1; echo DD_EXIT:${PIPESTATUS[0]}`.
+- **`iptables -L DOCKER-USER` shows duplicated `sandbox-egress` rules:**
+  you're on a pre-fix `iptables-setup.sh` — `git pull`, then re-run.
+  The current cleanup loop deletes existing tagged rules before
+  appending; old versions had a quoting bug that left stale rules
+  in place.

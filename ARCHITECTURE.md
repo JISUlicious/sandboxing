@@ -52,6 +52,17 @@ For **what** it does, see [SPECIFICATION.md](./SPECIFICATION.md).
   Host disk: per-session named volumes, audit JSONL, SQLite registry.
 ```
 
+**Process model.** Three processes run continuously on the host: the
+**control plane** (FastAPI / uvicorn — this codebase, launched directly
+or via the systemd unit in `deploy/sandbox-api.service`), the **Docker
+daemon** (with `runsc` registered as a runtime), and the **egress
+proxy** (Squid in the `sandbox-proxy` container, joined to
+`sandbox_egress` at a pinned IP). One additional process per active
+session — the gVisor-sandboxed runtime container — is created and
+torn down by the session lifecycle. SQLite, the audit JSONL, and the
+per-session XFS-pinned volumes live on host disk; the control plane
+is the only thing that talks to the Docker daemon.
+
 ## 2. Components
 
 ### 2.1 Control Plane (FastAPI)
@@ -127,11 +138,16 @@ pids_limit           = limits.pids
 mem_limit            = limits.memory_bytes
 nano_cpus            = limits.cpu_nanos         # = limits.vcpu * 1_000_000_000
 network              = "sandbox_egress"
-environment          = {"HTTPS_PROXY": "http://proxy:3128",
-                        "HTTP_PROXY":  "http://proxy:3128",
+environment          = {"HTTPS_PROXY": settings.egress_proxy_url,
+                        "HTTP_PROXY":  settings.egress_proxy_url,
                         "NO_PROXY":    "",
                         "HOME":        "/workspace",
                         "USER":        "agent"}
+# `egress_proxy_url` defaults to "http://proxy:3128" (Docker DNS
+# resolves the proxy container's name on the bridge). gVisor's
+# netstack doesn't always reach Docker's embedded DNS, so production
+# typically overrides to the proxy's pinned IP, e.g.
+# "http://172.30.0.2:3128".
 ulimits              = [{"name": "nofile", "soft": 1024, "hard": 1024}]
 entrypoint           = ["/usr/bin/sleep", "infinity"]
 labels               = {"sandbox.session_id": session_id,
@@ -183,22 +199,29 @@ labels               = {"sandbox.session_id": session_id,
 ### 2.6 Volume Store
 
 - **ARCH-050** One Docker named volume per session
-  (`sandbox-vol-{session_id}`), mounted at `/workspace`. Volume size
-  enforcement:
-  - **Production:** XFS project quota on `/var/lib/sandbox-volumes`
-    (or ext4 with `prjquota`). The driver assigns a unique project ID
-    per volume and applies the configured size limit at the FS layer.
-  - **Dev mode** (`SANDBOX_DEV_MODE=1`, see
-    [SPEC-302](./SPECIFICATION.md#6-resource-limits-and-defaults)):
-    no FS-level quota; the driver tracks volume size with a periodic
-    `du` and rejects writes after the limit is reached. Dev mode is
-    not safe against malicious workloads — local iteration only.
+  (`sandbox-vol-{session_id}`), mounted at `/workspace`. Two modes,
+  controlled by whether `quota_volume_base` is configured:
+  - **Production (bind mode):** the driver creates the Docker volume
+    with `driver=local`, `type=none`, `o=bind`,
+    `device=$quota_volume_base/<session_id>`, so the volume is a bind
+    mount onto a directory on an XFS-prjquota mount. The control plane
+    pre-creates the directory (`mkdir + chmod 0777` so container UID
+    10001 can write through), then runs the operator-provided
+    `quota_setup_cmd` to assign a project ID and `bhard` limit. This
+    is what makes SPEC-302's quota actually fire — Docker's default
+    volume location is usually on a non-prjquota filesystem.
+  - **Dev mode** (`quota_volume_base` unset): the driver uses the
+    default local volume layout under `/var/lib/docker/volumes`.
+    No FS-level quota — local iteration only.
 - **ARCH-051** Volumes survive idle-stop and resume. Destroy is a
   multi-step operation; the registry is the source of truth:
   1. Mark row `DESTROYING` (committed before any docker call).
   2. `docker rm -f` the container.
-  3. `docker volume rm` the volume.
-  4. Mark row `DESTROYED`, set `destroyed_at`.
+  3. Run `quota_teardown_cmd` (clears the project ID + limit and
+     removes the `/etc/projects` entry) before the directory goes
+     away.
+  4. `docker volume rm` the volume.
+  5. Mark row `DESTROYED`, set `destroyed_at`.
 
   On reconcile (control-plane restart), any row in `DESTROYING` is
   resumed from the failed step idempotently — both `docker rm` and
@@ -216,6 +239,35 @@ labels               = {"sandbox.session_id": session_id,
   expected but out of scope here.
 
 ## 3. Data Flow
+
+### 3.0 Service startup
+
+The control plane's FastAPI lifespan runs the following before
+accepting traffic; failures here keep the service from binding:
+
+1. **Bind-host guard** — refuse non-loopback bind in dev mode
+   (SPEC-302). Production has no such guard; bind `127.0.0.1` and
+   front with TLS at the edge.
+2. **Token guard** — refuse if `SANDBOX_API_TOKEN` is unset.
+3. **`Registry.init()`** — open SQLite at `db_path`, idempotently
+   create the schema (ARCH-010).
+4. **`DockerClient.ensure_runtime()`** — verify `runsc` is registered
+   with the Docker daemon (SPEC-400). Hard fail in production; dev
+   mode logs a warning and proceeds.
+5. **`DockerClient.ensure_network()`** — verify or create the
+   `sandbox_egress` bridge. Operators typically pre-create it with the
+   pinned subnet referenced by `deploy/iptables-setup.sh`.
+6. **`Reaper.start()`** — spawn the background reaper task. It runs
+   `tick()` every `reaper_interval_s`: an audit `maintenance_tick`
+   (so the fail-closed circuit tests itself without traffic), an
+   idle-stop sweep, a hard-TTL destroy sweep, and a refresh of the
+   `sandbox_sessions_by_status` Prometheus gauge.
+
+Once `lifespan` returns, FastAPI starts accepting requests. Every
+mutating endpoint (`POST /v1/sessions`, `/exec`, `/files`, etc.) calls
+`audit.precheck()` at its entry — if the audit log is unhealthy the
+request is rejected with `503 audit_unhealthy` before any side effect
+runs.
 
 ### 3.1 Create Session
 

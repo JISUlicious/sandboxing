@@ -1,20 +1,24 @@
 # Sandbox Service
 
-Production-shaped sandbox for an LLM agent application. See
+Production-shaped sandbox for an LLM agent application. Long-lived,
+hardened containers (gVisor + cap-drop + read-only rootfs +
+userns-remap), HTTP/JSON control plane with SSE streaming, default-deny
+egress through a Squid proxy, XFS project quotas on per-session
+workspaces, audit log with fail-closed semantics. See
 [SPECIFICATION.md](./SPECIFICATION.md) and
-[ARCHITECTURE.md](./ARCHITECTURE.md) for the full design.
+[ARCHITECTURE.md](./ARCHITECTURE.md) for the contract and the design.
 
-This branch implements **Slice 1 — control-plane skeleton + session
-lifecycle** (Create / Get / Stop / Resume / Destroy). Exec, file I/O,
-egress proxy, audit-log fail-closed, reaper, and `/metrics` are
-follow-up slices.
+For the install / validation walkthroughs, see
+[docs/SETUP.md](./docs/SETUP.md) and
+[docs/TESTING.md](./docs/TESTING.md).
 
 ## Requirements
 
 - Python ≥ 3.11 (the project targets 3.12; managed by [uv](https://github.com/astral-sh/uv)).
 - Docker Desktop (macOS / Windows) or Docker Engine (Linux).
-- For **production**: Linux host with `runsc` (gVisor) registered as a
-  Docker runtime and an XFS-formatted volume directory. See SPEC-400
+- For **production**: Linux x86_64 with `runsc` (gVisor) registered as
+  a Docker runtime, daemon `userns-remap=default`, and an
+  XFS-formatted (or ext4 + `prjquota`) volume directory. See SPEC-400
   and SPEC-302.
 
 ## Run locally (dev mode)
@@ -36,13 +40,13 @@ curl -H 'Authorization: Bearer dev-token' \
 
 `SANDBOX_DEV_MODE=1` (SPEC-302) relaxes the production-only checks
 (runsc required, XFS quota required) so the service can run on a
-developer Mac. The host MUST bind to loopback in dev mode; binding
-to a non-loopback interface is refused.
+developer Mac via Docker Desktop. Dev mode refuses non-loopback bind.
 
-## Build the sandbox image
+## Build the images
 
 ```bash
-docker build -t sandbox-runtime:latest sandbox/
+docker build -t sandbox-runtime:latest sandbox/   # the per-session container
+docker build -t sandbox-proxy:latest   proxy/     # the Squid egress proxy
 ```
 
 ## Tests
@@ -51,20 +55,36 @@ docker build -t sandbox-runtime:latest sandbox/
 uv run pytest
 ```
 
-The tests mock the Docker client; they pass without a running daemon.
-End-to-end tests against a real Docker daemon are deferred to a later
-slice.
+69 unit tests mock the Docker client and run without a daemon. For
+end-to-end testing against a deployed Linux host, see
+[docs/TESTING.md](./docs/TESTING.md) and
+[`tools/smoke-remote.sh`](./tools/smoke-remote.sh).
 
-## What this slice does NOT do yet
+## API surface
 
-- `exec`, `exec/stream`, file I/O endpoints (slice 2).
-- Egress proxy + iptables (slice 4).
-- Audit log fail-closed semantics (slice 4).
-- Reaper / idle-stop (slice 5).
-- `/metrics`, token rotation, `userns-remap=default` enforcement
-  (slice 5+).
-- runsc enforcement on production hosts (validated in CI on Linux).
+- **Sessions** — `POST /v1/sessions`, `GET /v1/sessions/{id}`,
+  `POST /v1/sessions/{id}/{stop,resume}`, `DELETE /v1/sessions/{id}`
+- **Exec** — `POST /v1/sessions/{id}/exec` (sync) and
+  `POST /v1/sessions/{id}/exec/stream` (Server-Sent Events)
+- **Files** — `POST /v1/sessions/{id}/files` (write, base64 body),
+  `GET /v1/sessions/{id}/files/{path}` (read, octet-stream),
+  `GET /v1/sessions/{id}/files?dir=...` (list),
+  `DELETE /v1/sessions/{id}/files/{path}?recursive=...` (delete)
+- **Operations** — `GET /healthz`, `GET /readyz` (reports
+  `{docker, audit}`), `GET /metrics` (Prometheus exposition)
 
-The hardening flag-set in `api/docker_client.py` is the canonical list
-from ARCH-021; in dev mode `runtime=runsc` is downgraded to the
-default Docker runtime so the API works on macOS.
+OpenAPI / Swagger UI at `/docs`, ReDoc at `/redoc`, machine-readable
+schema at `/openapi.json`.
+
+## Repo layout
+
+```
+api/         control-plane source (FastAPI, registry, docker driver,
+             exec, files, audit, reaper, metrics)
+sandbox/     Dockerfile for sandbox-runtime
+proxy/       Dockerfile + squid.conf + allowed-domains.txt for sandbox-proxy
+deploy/      iptables-setup.sh, systemd units, xfs-quota-{setup,teardown}.sh.example
+tools/       smoke-remote.sh (e2e validation against a deployed host)
+docs/        SETUP.md (install) and TESTING.md (e2e walkthrough)
+tests/       69 unit tests, all mocked at the DockerClient boundary
+```

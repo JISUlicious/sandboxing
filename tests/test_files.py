@@ -215,3 +215,34 @@ def test_delete_directory_with_recursive(authed, fake_docker):
 # fails to route at all. The defense-in-depth check lives in
 # `resolve_workspace_path`, exercised by
 # `test_resolve_rejects_workspace_root_unless_allowed` above.
+
+
+# ----- transparent resume (mirrors /exec, SPEC-104) -----
+
+
+def test_write_transparently_resumes_stopped_session(authed, fake_docker):
+    sid = _create(authed)
+    authed.post(f"/v1/sessions/{sid}/stop")
+    pre_starts = len(fake_docker.started)
+
+    body = base64.b64encode(b"hello").decode()
+    r = authed.post(
+        f"/v1/sessions/{sid}/files",
+        json={"path": "g.txt", "content_b64": body},
+    )
+    assert r.status_code == 201, r.text
+    # File ops should auto-resume just like exec does.
+    assert len(fake_docker.started) == pre_starts + 1
+    assert authed.get(f"/v1/sessions/{sid}").json()["status"] == "RUNNING"
+
+
+def test_read_transparently_resumes_stopped_session(authed, fake_docker):
+    sid = _create(authed)
+    fake_docker.get_archive_responses["/workspace/data.bin"] = (b"hello", 0o640)
+    authed.post(f"/v1/sessions/{sid}/stop")
+    pre_starts = len(fake_docker.started)
+
+    r = authed.get(f"/v1/sessions/{sid}/files/data.bin")
+    assert r.status_code == 200
+    assert r.content == b"hello"
+    assert len(fake_docker.started) == pre_starts + 1

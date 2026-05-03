@@ -11,10 +11,12 @@ import asyncio
 import base64
 import logging
 import posixpath
+import time
 from dataclasses import dataclass
 
 from fastapi import HTTPException
 
+from api import metrics
 from api.audit import AuditEmitter
 from api.docker_client import DockerClient
 from api.errors import InvalidArgument, InvalidPath, InvalidState, SessionNotFound
@@ -208,10 +210,26 @@ class FileService:
         )
 
     async def _require_running(self, session_id: str, tenant_id: str) -> _Session:
+        """Resolve the session, transparently resuming if STOPPED / IDLE.
+
+        Mirrors ExecService._prepare so file ops have the same multi-turn
+        contract as exec (SPEC-104, ARCH §3.2). Without this, a long-lived
+        agent that lets the reaper idle-stop a session would have to
+        explicitly /resume before any file I/O — surfacing lifecycle state
+        the agent shouldn't need to track.
+        """
         session = await self.registry.get(session_id, tenant_id)
         if session is None:
             raise SessionNotFound()
-        if session.status not in ("RUNNING", "IDLE"):
+        if session.status not in ("RUNNING", "IDLE", "STOPPED"):
             raise InvalidState(f"cannot operate on files in session status {session.status}")
+        if session.status in ("STOPPED", "IDLE"):
+            assert session.container_id is not None
+            start_ns = time.monotonic_ns()
+            await asyncio.to_thread(self.docker.start_container, session.container_id)
+            await self.registry.transition(session_id, "RUNNING")
+            metrics.resume_seconds.observe((time.monotonic_ns() - start_ns) / 1_000_000_000)
+            session = await self.registry.get(session_id, tenant_id)
+            assert session is not None
         assert session.container_id is not None
         return _Session(id=session.id, container_id=session.container_id)

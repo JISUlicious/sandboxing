@@ -246,11 +246,18 @@ labels               = {"sandbox.session_id": session_id,
 
 ### 3.3 Write File
 
-1. Validate path: must resolve under `/workspace` after symlink
+1. Resolve session ownership; if state is `STOPPED` / `IDLE`,
+   transparently `resume` first (same contract as
+   [§3.2 step 3](#32-exec)). Long-lived agents shouldn't have to track
+   lifecycle state to do file I/O.
+2. Validate path: must resolve under `/workspace` after symlink
    resolution; reject otherwise with `invalid_path`.
-2. Stream content via `docker cp -` or via an in-container `cat >file`
+3. Stream content via `docker cp -` or via an in-container `cat >file`
    over `docker exec` (MVP uses the latter; `cp` upgrade tracked).
-3. Emit audit (path, size, mode); update `last_activity_at`.
+4. Emit audit (path, size, mode); update `last_activity_at`.
+
+The same step 1 transparent-resume applies to file read / list /
+delete.
 
 ### 3.4 Stop / Resume
 

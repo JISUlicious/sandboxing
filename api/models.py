@@ -5,6 +5,21 @@ from pydantic import BaseModel, Field
 SessionStatus = Literal["CREATING", "RUNNING", "IDLE", "STOPPED", "DESTROYING", "DESTROYED"]
 
 
+# ----- error envelope (every 4xx / 5xx body in the API) -----
+
+
+class ErrorDetail(BaseModel):
+    code: str = Field(
+        description="Stable machine-readable error code. See SPEC §9.",
+        examples=["session_not_found"],
+    )
+    message: str = Field(description="Human-readable explanation; safe to log.")
+
+
+class ErrorResponse(BaseModel):
+    detail: ErrorDetail
+
+
 class Limits(BaseModel):
     vcpu: int = Field(2, ge=1)
     memory_mib: int = Field(2048, ge=64)

@@ -1,8 +1,12 @@
 # Sandbox egress allowlist. One pattern per line. # for comments.
 #
-# Patterns are squid `dstdomain` matches:
-#   - `example.com`   matches exactly example.com
-#   - `.example.com`  matches example.com AND any subdomain (foo.example.com etc.)
+# Squid `dstdomain` patterns:
+#   - `example.com`   matches exactly example.com (no subdomains)
+#   - `.example.com`  matches example.com AND every subdomain
+#
+# Don't list both — Squid 6+ treats redundancy as a fatal config error
+# and won't start. Pick the broader form (`.example.com`) when in
+# doubt; it's a superset.
 #
 # Default content below covers the common agent install paths
 # (pip, npm, git clone from GitHub). Edit to fit your workload.
@@ -15,13 +19,10 @@
 
 # --- Node packaging ---
 .npmjs.org
-registry.npmjs.org
 
 # --- Git / GitHub ---
 .github.com
-github.com
 .githubusercontent.com
-codeload.github.com
 
 # --- General trust roots ---
 .python.org

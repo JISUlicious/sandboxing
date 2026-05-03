@@ -49,16 +49,21 @@ if ! iptables -L "$CHAIN" -n >/dev/null 2>&1; then
     exit 1
 fi
 
-# Remove any rules previously inserted with our tag (idempotency).
-# `|| true` swallows grep's exit-1-on-no-matches under `set -o pipefail`
-# so a clean first run doesn't abort the script before adding rules.
-existing=$(iptables -S "$CHAIN" | grep -F -- "--comment $TAG" || true)
-if [[ -n "$existing" ]]; then
-    while read -r rule; do
-        # shellcheck disable=SC2086
-        iptables $rule || true
-    done < <(printf '%s\n' "$existing" | sed 's/^-A /-D /')
-fi
+# Remove any rules previously inserted with our tag (idempotent on
+# any number of duplicates). Each delete is retried until iptables
+# returns non-zero — i.e. no more matching rules. Done this way
+# instead of parsing `iptables -S` output because comments contain
+# spaces and would word-split when re-fed via `iptables $rule`.
+delete_all() {
+    while iptables -D "$CHAIN" "$@" 2>/dev/null; do :; done
+}
+delete_all -s "$PROXY_IP" \
+    -m comment --comment "$TAG proxy-egress" -j ACCEPT
+delete_all -s "$SANDBOX_SUBNET" -d "$PROXY_IP" \
+    -p tcp --dport "$PROXY_PORT" \
+    -m comment --comment "$TAG sandbox-to-proxy" -j ACCEPT
+delete_all -s "$SANDBOX_SUBNET" \
+    -m comment --comment "$TAG sandbox-drop-default" -j DROP
 
 # Append in order. Append, not insert: the chain is otherwise managed
 # by Docker, and prepending would conflict with rules Docker inserts.

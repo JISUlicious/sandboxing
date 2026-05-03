@@ -29,7 +29,9 @@ set -euo pipefail
 # tooling treats them as int).
 PROJECT_ID=$(printf '%s' "$SESSION_ID" | cksum | awk '{print $1 % 2147483647}')
 
-mkdir -p "$VOLUME_PATH"
+# Note: VOLUME_PATH is created by the control plane (docker_client.py
+# bind-mounts the Docker volume here) before this script runs. We
+# don't need to mkdir.
 
 # Mark the directory as belonging to the project.
 xfs_quota -x -c "project -s -p $VOLUME_PATH $PROJECT_ID" "$VOLUME_BASE"

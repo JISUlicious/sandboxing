@@ -174,13 +174,35 @@ class DockerClient:
             )
 
     def create_volume(self, volume_name: str, session_id: str, tenant_id: str) -> None:
-        self.client.volumes.create(
-            name=volume_name,
-            labels={
-                "sandbox.session_id": session_id,
-                "sandbox.tenant_id": tenant_id,
-            },
-        )
+        labels = {
+            "sandbox.session_id": session_id,
+            "sandbox.tenant_id": tenant_id,
+        }
+        bind_base = self._settings.quota_volume_base
+        # When a quota volume base is configured, bind the Docker volume
+        # to a per-session directory there. This is what makes
+        # SPEC-302's XFS project quota actually apply — Docker's default
+        # volume location (/var/lib/docker/volumes) usually isn't on
+        # the prjquota-enabled filesystem.
+        if str(bind_base):
+            bind_path = bind_base / session_id
+            bind_path.mkdir(parents=True, exist_ok=True)
+            # Container runs as UID 10001 (ARCH-032); make the bind
+            # writable. 0777 is a stopgap; production should pre-chown
+            # to the userns-remap'd subuid that 10001 lands on.
+            bind_path.chmod(0o777)
+            self.client.volumes.create(
+                name=volume_name,
+                driver="local",
+                driver_opts={
+                    "type": "none",
+                    "device": str(bind_path),
+                    "o": "bind",
+                },
+                labels=labels,
+            )
+        else:
+            self.client.volumes.create(name=volume_name, labels=labels)
 
     def remove_volume(self, volume_name: str) -> None:
         try:

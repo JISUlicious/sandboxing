@@ -32,5 +32,15 @@ class Settings(BaseSettings):
 
     tenant_max_concurrent: int = 50
 
+    # SPEC-302 quota hooks. Both empty by default — no-op in dev mode.
+    # In production point these at the deploy/xfs-quota-{setup,teardown}.sh
+    # examples (or any script that takes SESSION_ID, VOLUME_NAME,
+    # VOLUME_PATH, WORKSPACE_MIB env vars and returns 0 on success).
+    quota_setup_cmd: str = ""
+    quota_teardown_cmd: str = ""
+    # Mountpoint where per-session volume directories live (passed to
+    # the quota scripts as VOLUME_BASE).
+    quota_volume_base: Path = Path("/var/lib/sandbox-volumes")
+
 
 settings = Settings()

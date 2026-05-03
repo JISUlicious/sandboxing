@@ -8,7 +8,7 @@ import time
 
 from ulid import ULID
 
-from api import metrics
+from api import metrics, quota
 from api.audit import AuditEmitter
 from api.config import Settings
 from api.docker_client import DockerClient
@@ -76,6 +76,16 @@ class SessionService:
         start_ns = time.monotonic_ns()
         try:
             await asyncio.to_thread(self.docker.create_volume, volume_name, session_id, tenant_id)
+            # SPEC-302: hook for the operator's xfs_quota / prjquota
+            # script. No-op in dev mode (cmd is empty by default).
+            await quota.run_setup(
+                cmd=self.settings.quota_setup_cmd,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                volume_name=volume_name,
+                volume_base=self.settings.quota_volume_base,
+                workspace_mib=limits.workspace_mib,
+            )
             container_id = await asyncio.to_thread(
                 self.docker.create_container,
                 session_id=session_id,
@@ -197,6 +207,15 @@ class SessionService:
         try:
             if row.container_id:
                 await asyncio.to_thread(self.docker.remove_container, row.container_id)  # step 2
+            # Quota teardown before volume removal — the operator script
+            # can free its project ID with the directory still present.
+            await quota.run_teardown(
+                cmd=self.settings.quota_teardown_cmd,
+                session_id=row.id,
+                tenant_id=row.tenant_id,
+                volume_name=row.volume_name,
+                volume_base=self.settings.quota_volume_base,
+            )
             await asyncio.to_thread(self.docker.remove_volume, row.volume_name)  # step 3
         finally:
             await self.registry.transition(row.id, "DESTROYED")  # step 4

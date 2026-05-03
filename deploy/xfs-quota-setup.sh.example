@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# deploy/xfs-quota-setup.sh — sample quota_setup_cmd.
+#
+# Allocates an XFS project ID to a session's workspace directory and
+# enforces the per-volume size cap (SPEC-302).
+#
+# The control plane invokes this with these env vars:
+#   SESSION_ID     ULID of the session
+#   TENANT_ID      tenant id (currently always "default")
+#   VOLUME_NAME    docker volume name (sandbox-vol-<session-id>)
+#   VOLUME_PATH    $VOLUME_BASE/$SESSION_ID — where to apply the project ID
+#   VOLUME_BASE    XFS-mounted workspace root (/var/lib/sandbox-volumes)
+#   WORKSPACE_MIB  size limit in MiB
+#
+# Usage in /etc/sandbox/env:
+#   SANDBOX_QUOTA_SETUP_CMD=/opt/sandbox/deploy/xfs-quota-setup.sh
+#   SANDBOX_QUOTA_TEARDOWN_CMD=/opt/sandbox/deploy/xfs-quota-teardown.sh
+#   SANDBOX_QUOTA_VOLUME_BASE=/var/lib/sandbox-volumes
+
+set -euo pipefail
+
+: "${SESSION_ID:?}"
+: "${VOLUME_PATH:?}"
+: "${VOLUME_BASE:?}"
+: "${WORKSPACE_MIB:?}"
+
+# Derive a stable project ID from the ULID. ULIDs are Crockford-base32;
+# we hash to a 31-bit positive int (XFS project IDs are uint32 but
+# tooling treats them as int).
+PROJECT_ID=$(printf '%s' "$SESSION_ID" | cksum | awk '{print $1 % 2147483647}')
+
+mkdir -p "$VOLUME_PATH"
+
+# Mark the directory as belonging to the project.
+xfs_quota -x -c "project -s -p $VOLUME_PATH $PROJECT_ID" "$VOLUME_BASE"
+
+# Enforce the size limit (hard).
+xfs_quota -x -c "limit -p bhard=${WORKSPACE_MIB}m $PROJECT_ID" "$VOLUME_BASE"
+
+# Persist the project ID so teardown can find it.
+echo "$PROJECT_ID" > "$VOLUME_PATH/.project_id"

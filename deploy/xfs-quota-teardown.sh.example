@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# deploy/xfs-quota-teardown.sh — sample quota_teardown_cmd.
+#
+# Removes the per-session XFS project ID and quota. Idempotent —
+# repeated runs (e.g., from a reaper retry) are safe.
+#
+# Env vars: SESSION_ID, VOLUME_NAME, VOLUME_PATH, VOLUME_BASE.
+
+set -euo pipefail
+
+: "${VOLUME_PATH:?}"
+: "${VOLUME_BASE:?}"
+
+# Read back the project ID we recorded at setup time.
+if [[ ! -f "$VOLUME_PATH/.project_id" ]]; then
+    # Already torn down (or never set up).
+    exit 0
+fi
+PROJECT_ID="$(cat "$VOLUME_PATH/.project_id")"
+
+# Clear the project ID and limits.
+xfs_quota -x -c "limit -p bhard=0 $PROJECT_ID" "$VOLUME_BASE" || true
+xfs_quota -x -c "project -C -p $VOLUME_PATH $PROJECT_ID" "$VOLUME_BASE" || true
+
+rm -f "$VOLUME_PATH/.project_id"

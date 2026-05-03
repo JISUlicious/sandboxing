@@ -40,6 +40,18 @@ class ExecOutput:
     truncated_streams: list[str] = field(default_factory=list)
 
 
+def _wrap_with_timeout(argv: list[str], timeout_s: int) -> list[str]:
+    """Prepend coreutils' `timeout` so the wall-clock budget is enforced
+    by the kernel rather than by the control plane.
+
+    NOTE: do NOT pass `--preserve-status`. With it, GNU `timeout`
+    returns the inner program's signal-exit code (e.g. 143 for SIGTERM)
+    instead of 124 on timeout, which breaks the exec_timeout mapping.
+    See `TIMEOUT_EXIT_CODE` and the `ExecTimeout` raise in `ExecService`.
+    """
+    return ["/usr/bin/timeout", str(timeout_s), *argv]
+
+
 def _append_capped(buf: bytearray, chunk: bytes, name: str, truncated: set[str]) -> None:
     """Append `chunk` to `buf` until OUTPUT_CAP_BYTES; mark `name` truncated.
 
@@ -241,7 +253,7 @@ class DockerClient:
 
         api = self.client.api
         # SPEC-201: deterministic timeout via coreutils' `timeout` (exit 124).
-        wrapped = ["/usr/bin/timeout", "--preserve-status", str(timeout_s), *argv]
+        wrapped = _wrap_with_timeout(argv, timeout_s)
         exec_id = api.exec_create(
             container_id,
             cmd=wrapped,
@@ -288,7 +300,7 @@ class DockerClient:
         from docker.utils.socket import frames_iter
 
         api = self.client.api
-        wrapped = ["/usr/bin/timeout", "--preserve-status", str(timeout_s), *argv]
+        wrapped = _wrap_with_timeout(argv, timeout_s)
         exec_id = api.exec_create(
             container_id,
             cmd=wrapped,
@@ -351,7 +363,7 @@ class DockerClient:
         for applying the SPEC-203 cap and for emitting SSE frames.
         """
         api = self.client.api
-        wrapped = ["/usr/bin/timeout", "--preserve-status", str(timeout_s), *argv]
+        wrapped = _wrap_with_timeout(argv, timeout_s)
         exec_id = api.exec_create(
             container_id,
             cmd=wrapped,

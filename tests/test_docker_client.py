@@ -42,6 +42,17 @@ def test_hardening_flags_canonical_production():
     assert labels["sandbox.tenant_id"] == "t1"
 
 
+def test_wrap_with_timeout_omits_preserve_status():
+    """Regression: --preserve-status makes GNU `timeout` return the inner
+    program's signal-exit code (143 for SIGTERM) instead of 124 on timeout,
+    which silently breaks the exec_timeout → 408 mapping."""
+    from api.docker_client import _wrap_with_timeout
+
+    cmd = _wrap_with_timeout(["sleep", "30"], 2)
+    assert cmd == ["/usr/bin/timeout", "2", "sleep", "30"]
+    assert "--preserve-status" not in cmd
+
+
 def test_hardening_flags_dev_mode_omits_runtime():
     flags = hardening_flags(
         session_id="s1",

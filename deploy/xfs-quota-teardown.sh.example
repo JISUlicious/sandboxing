@@ -1,33 +1,6 @@
 #!/usr/bin/env bash
-# deploy/xfs-quota-teardown.sh — clear an XFS project quota for a session.
-#
-# Idempotent — repeated runs (e.g. from a reaper retry) succeed.
-# Env vars: SESSION_ID, VOLUME_NAME, VOLUME_PATH, VOLUME_BASE.
+# Wrapper invoked by the control plane for SPEC-302 quota teardown.
+# See deploy/sandbox-quota-helper.sh for the privileged implementation.
 
 set -euo pipefail
-
-: "${VOLUME_PATH:?}"
-: "${VOLUME_BASE:?}"
-
-if [[ ! -f "$VOLUME_PATH/.project_id" ]]; then
-    # Already torn down (or never set up). Quota teardown is best-effort.
-    exit 0
-fi
-
-PROJECT_ID="$(cat "$VOLUME_PATH/.project_id" 2>/dev/null || true)"
-if [[ -z "$PROJECT_ID" ]]; then
-    exit 0
-fi
-
-# Clear the limit and the project mapping. Failures at either step are
-# tolerated so a partially-already-cleaned project doesn't block destroy.
-sudo xfs_quota -x \
-    -c "limit -p bhard=0 ${PROJECT_ID}" \
-    -c "project -C -p ${VOLUME_PATH} ${PROJECT_ID}" \
-    "$VOLUME_BASE" \
-    || true
-
-# Remove the /etc/projects entry. Best-effort.
-sudo sed -i "/^${PROJECT_ID}:/d" /etc/projects 2>/dev/null || true
-
-rm -f "$VOLUME_PATH/.project_id"
+exec sudo -n /usr/local/bin/sandbox-quota-helper teardown

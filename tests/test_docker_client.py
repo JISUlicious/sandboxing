@@ -1,6 +1,9 @@
 """Regression tests for the canonical hardening flag-set (SPEC-401 / ARCH-021)."""
 
-from api.docker_client import hardening_flags
+from unittest.mock import MagicMock, patch
+
+from api.config import Settings
+from api.docker_client import DockerClient, hardening_flags
 from api.models import Limits
 
 
@@ -78,3 +81,64 @@ def test_create_session_applies_canonical_flags(authed, fake_docker):
     assert flags["cap_drop"] == ["ALL"]
     # Tests run with dev_mode=True per conftest, so runtime is omitted.
     assert "runtime" not in flags
+
+
+def _docker_client_with_fake_engine(settings: Settings) -> DockerClient:
+    client = DockerClient(settings)
+    fake_engine = MagicMock()
+    fake_engine.volumes.create = MagicMock()
+    client._client = fake_engine
+    return client
+
+
+def test_create_volume_chowns_bind_when_uid_set(tmp_path):
+    """SPEC-401: with bind_volume_uid set, per-session bind dirs are
+    chown'd to the userns-remap subuid + chmod'd 0700."""
+    base = tmp_path / "volumes"
+    settings = Settings(
+        api_token="t",
+        quota_volume_base=base,
+        bind_volume_uid=110001,
+    )
+    client = _docker_client_with_fake_engine(settings)
+
+    chown_calls: list[tuple[str, int, int]] = []
+    chmod_calls: list[tuple[str, int]] = []
+
+    def fake_chown(path, uid, gid):
+        chown_calls.append((str(path), uid, gid))
+
+    def fake_chmod(self, mode):
+        chmod_calls.append((str(self), mode))
+
+    with patch("api.docker_client.os.chown", fake_chown), patch.object(
+        type(base), "chmod", fake_chmod
+    ):
+        client.create_volume("vol-x", "session-x", "tenant-x")
+
+    assert chown_calls == [(str(base / "session-x"), 110001, 110001)]
+    assert chmod_calls == [(str(base / "session-x"), 0o700)]
+
+
+def test_create_volume_falls_back_to_0777_when_uid_unset(tmp_path):
+    """Back-compat: without bind_volume_uid, the legacy 0777 stopgap stays."""
+    base = tmp_path / "volumes"
+    settings = Settings(api_token="t", quota_volume_base=base, bind_volume_uid=None)
+    client = _docker_client_with_fake_engine(settings)
+
+    chown_calls: list = []
+    chmod_calls: list[tuple[str, int]] = []
+
+    def fake_chown(*args, **kwargs):
+        chown_calls.append((args, kwargs))
+
+    def fake_chmod(self, mode):
+        chmod_calls.append((str(self), mode))
+
+    with patch("api.docker_client.os.chown", fake_chown), patch.object(
+        type(base), "chmod", fake_chmod
+    ):
+        client.create_volume("vol-x", "session-x", "tenant-x")
+
+    assert chown_calls == []
+    assert chmod_calls == [(str(base / "session-x"), 0o777)]

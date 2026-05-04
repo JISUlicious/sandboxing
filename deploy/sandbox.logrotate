@@ -1,0 +1,25 @@
+# /etc/logrotate.d/sandbox — daily audit-log rotation.
+#
+# Audit log is `chattr +a` (immutable-append) so tampering is visible.
+# logrotate has to suspend the bit during rotation and put it back
+# afterwards, which the pre/postrotate hooks below handle.
+#
+# Installed by `deploy/setup-host.sh`.
+
+/var/log/sandbox/audit.log {
+    daily
+    rotate 30
+    missingok
+    notifempty
+    delaycompress
+    compress
+    create 0640 sandbox sandbox
+    su sandbox sandbox
+    sharedscripts
+    prerotate
+        chattr -a /var/log/sandbox/audit.log 2>/dev/null || true
+    endscript
+    postrotate
+        chattr +a /var/log/sandbox/audit.log 2>/dev/null || true
+    endscript
+}

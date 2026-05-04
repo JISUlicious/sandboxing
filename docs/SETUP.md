@@ -347,6 +347,22 @@ EOF
 sudo systemctl enable --now sandbox-image-warm
 ```
 
+### 8 · Sandbox image upgrades
+
+Build a new sandbox image (different tag), then run the upgrade
+script — it pulls the tag, smoke-tests it, atomically swaps
+`SANDBOX_SANDBOX_IMAGE` in `/etc/sandbox/env`, and restarts the API.
+
+```bash
+docker build -t sandbox-runtime:v2026-05-04 sandbox/
+sudo /opt/sandbox/deploy/upgrade-sandbox-image.sh sandbox-runtime:v2026-05-04
+```
+
+Existing sessions keep their old image (per ARCH §8 blue/green —
+"old sessions keep their image until destroyed"). Only sessions
+created *after* the swap use the new image. Rollback prints at the
+end of the script: copy the `.bak` env file back and restart.
+
 ### VM notes (production)
 
 - **No nested KVM:** drop `runsc-kvm` from `daemon.json`; gVisor uses

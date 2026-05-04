@@ -227,6 +227,82 @@ class SessionService:
             payload={"reason": reason},
         )
 
+    # ----- reconciliation (slice 6a) -----
+
+    async def reconcile_on_startup(self) -> dict[str, int]:
+        """Walk the registry on boot, finish stuck destroys, mark
+        orphaned sessions STOPPED. The promise made in ARCH-051 that
+        the spec docs reference but slice 1 punted on.
+
+        Returns a small summary dict of counts so the caller (lifespan
+        log line) can report what happened.
+        """
+        log.info("reconcile_on_startup: starting sweep")
+        finished_destroy = 0
+        orphaned = 0
+
+        # 1. Finish any DESTROYING rows. Each docker call is already
+        # idempotent on NotFound, so this works whether the failure
+        # was before, during, or after the docker calls.
+        for row in await self.registry.list_pending_destroy():
+            try:
+                if row.container_id:
+                    await asyncio.to_thread(self.docker.remove_container, row.container_id)
+                await quota.run_teardown(
+                    cmd=self.settings.quota_teardown_cmd,
+                    session_id=row.id,
+                    tenant_id=row.tenant_id,
+                    volume_name=row.volume_name,
+                    volume_base=self.settings.quota_volume_base,
+                )
+                await asyncio.to_thread(self.docker.remove_volume, row.volume_name)
+                await self.registry.transition(row.id, "DESTROYED")
+                finished_destroy += 1
+                await self.audit.emit(
+                    kind="session.reconciled",
+                    tenant=row.tenant_id,
+                    session=row.id,
+                    payload={"action": "finish_destroy"},
+                )
+            except Exception:
+                log.exception("reconcile: finish_destroy failed for %s", row.id)
+
+        # 2. Find orphaned non-terminal rows (container is gone but the
+        # registry still says CREATING/RUNNING/IDLE/STOPPED). Mark them
+        # STOPPED so the next exec gets a clean InvalidState rather
+        # than docker NotFound. Volume is preserved.
+        for row in await self.registry.list_non_terminal():
+            if not row.container_id:
+                # CREATING that never got a container — treat as orphaned.
+                await self.registry.transition_orphaned(row.id)
+                orphaned += 1
+                await self.audit.emit(
+                    kind="session.reconciled",
+                    tenant=row.tenant_id,
+                    session=row.id,
+                    payload={"action": "orphaned_no_container"},
+                )
+                continue
+            container_present = await asyncio.to_thread(
+                self.docker.container_exists, row.container_id
+            )
+            if not container_present and row.status != "STOPPED":
+                await self.registry.transition_orphaned(row.id)
+                orphaned += 1
+                await self.audit.emit(
+                    kind="session.reconciled",
+                    tenant=row.tenant_id,
+                    session=row.id,
+                    payload={"action": "orphaned_missing_container"},
+                )
+
+        log.info(
+            "reconcile_on_startup: done (finished_destroy=%d orphaned=%d)",
+            finished_destroy,
+            orphaned,
+        )
+        return {"finished_destroy": finished_destroy, "orphaned": orphaned}
+
     # ----- helpers -----
 
     def _default_limits(self) -> Limits:

@@ -246,6 +246,19 @@ class DockerClient:
         except NotFound:
             return  # idempotent (ARCH-051 reconcile)
 
+    def container_exists(self, container_id: str) -> bool:
+        """Used by startup reconciliation (slice 6a). Returns False if
+        the container has been removed (e.g. across a daemon restart);
+        any other docker error is treated as 'present' to avoid
+        falsely orphaning a session whose container is fine."""
+        try:
+            self.client.containers.get(container_id)
+            return True
+        except NotFound:
+            return False
+        except Exception:
+            return True
+
     # ----- exec (slice 2) -----
 
     def exec_in_container(

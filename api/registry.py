@@ -227,3 +227,34 @@ class Registry:
             cur = await db.execute("SELECT status, COUNT(*) AS n FROM sessions GROUP BY status")
             rows = await cur.fetchall()
             return {row["status"]: int(row["n"]) for row in rows}
+
+    async def list_non_terminal(self) -> Sequence[SessionRow]:
+        """Every row whose status is not DESTROYING / DESTROYED. Used by
+        startup reconciliation (ARCH-051) to find candidates whose
+        underlying container may be gone after a control-plane crash."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM sessions WHERE status NOT IN ('DESTROYING', 'DESTROYED')"
+            )
+            rows = await cur.fetchall()
+            return [_row_to_session(r) for r in rows]
+
+    async def transition_orphaned(self, session_id: str) -> None:
+        """Force a session to STOPPED regardless of current state, used
+        by reconciliation when the underlying container has vanished.
+
+        Bypasses the normal TRANSITIONS table because the row may be in
+        CREATING (which can't normally jump straight to STOPPED) — the
+        invariant the regular transition guards is "no logical state
+        skips during operation"; reconciliation is by definition a
+        recovery pass after that invariant has already been broken.
+        """
+        ts = now_ms()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE sessions SET status = 'STOPPED', last_activity_at = ? "
+                "WHERE id = ? AND status NOT IN ('DESTROYING', 'DESTROYED', 'STOPPED')",
+                (ts, session_id),
+            )
+            await db.commit()

@@ -173,6 +173,13 @@ def create_app(
         service_.docker.ensure_runtime()
         if service_.docker.health():
             service_.docker.ensure_network()
+            # ARCH-051 reconciliation: heal orphaned rows from any prior
+            # crash before serving traffic so the next exec doesn't
+            # surface docker NotFound.
+            try:
+                await service_.reconcile_on_startup()
+            except Exception:
+                log.exception("startup reconciliation failed; continuing anyway")
         else:
             log.warning("docker daemon not reachable; lifecycle calls will fail")
         if start_reaper:

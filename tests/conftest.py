@@ -91,6 +91,17 @@ class FakeDockerClient:
     def remove_container(self, container_id: str) -> None:
         self.removed_containers.append(container_id)
 
+    # Slice 6a — startup reconciliation. Default: every container the
+    # fake has heard of is "present"; tests override `missing_containers`
+    # to simulate a crashed-then-restarted daemon.
+    missing_containers: set[str] = set()  # class-level default; overridden per-instance
+
+    def container_exists(self, container_id: str) -> bool:
+        # Per-instance override if set, otherwise a permissive default
+        # so existing tests don't have to opt in.
+        missing = getattr(self, "_missing_containers", set())
+        return container_id not in missing
+
     # ----- slice 2 -----
 
     def exec_in_container(

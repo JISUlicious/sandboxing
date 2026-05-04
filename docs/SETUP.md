@@ -423,8 +423,26 @@ end of the script: copy the `.bak` env file back and restart.
 
 ## Validation: smoke tests for production posture
 
-Run these against a freshly-started service to prove each layer of
-hardening is actually in effect (not just configured).
+Two helper scripts run from a client machine over SSH; both use the
+same `.env` (see `.env.example`):
+
+- **`tools/smoke-remote.sh`** — quick smoke test of the slice-1-to-5
+  surface (create / exec / files / multi-turn / forbidden-env /
+  destroy). Use this after every deploy to confirm nothing's
+  obviously broken.
+- **`tools/validate-slices.sh`** — full validation of the slice-6/7/8
+  surface: resource sampler emits, token rotation grace, multi-tenant
+  isolation via the CLI, startup reconciliation (kills uvicorn
+  mid-state, drops a container, restarts, asserts the row was
+  orphaned to STOPPED), and OpenAPI schema-drift check. Use this
+  after upgrading the deployment to a new feature slice.
+
+Both scripts use ephemeral state under `/tmp` on the remote and
+never touch `/var/lib/sandbox` or `/etc/sandbox/env`.
+
+The hand-written checks below cover production-only signal that the
+automation can't observe (gVisor identifying itself, real iptables
+DROP, real XFS quota cap). Run after a fresh production deploy.
 
 ```bash
 TOKEN=$(sudo grep API_TOKEN /etc/sandbox/env | cut -d= -f2)

@@ -55,10 +55,20 @@ docker build -t sandbox-proxy:latest   proxy/     # the Squid egress proxy
 uv run pytest
 ```
 
-69 unit tests mock the Docker client and run without a daemon. For
+88 unit tests mock the Docker client and run without a daemon. For
 end-to-end testing against a deployed Linux host, see
-[docs/TESTING.md](./docs/TESTING.md) and
-[`tools/smoke-remote.sh`](./tools/smoke-remote.sh).
+[docs/TESTING.md](./docs/TESTING.md) and the helper scripts:
+
+- [`tools/smoke-remote.sh`](./tools/smoke-remote.sh) — quick smoke
+  test (lifecycle / exec / files / multi-turn).
+- [`tools/validate-slices.sh`](./tools/validate-slices.sh) — full
+  validation of slice-6/7/8 features (resource sampler, token
+  rotation, multi-tenant isolation, startup reconciliation, schema
+  drift).
+
+Two real-Docker integration tests are gated by
+`pytest -m integration`; CI runs them on a Linux runner per
+`.github/workflows/ci.yml`.
 
 ## API surface
 
@@ -84,7 +94,9 @@ api/         control-plane source (FastAPI, registry, docker driver,
 sandbox/     Dockerfile for sandbox-runtime
 proxy/       Dockerfile + squid.conf + allowed-domains.txt for sandbox-proxy
 deploy/      iptables-setup.sh, systemd units, xfs-quota-{setup,teardown}.sh.example
-tools/       smoke-remote.sh (e2e validation against a deployed host)
+tools/       smoke-remote.sh (e2e smoke), validate-slices.sh (slice
+             6/7/8 validation), dump_openapi.py (schema artifact),
+             sandbox_tenants.py (tenant + token CLI)
 docs/        SETUP.md (install) and TESTING.md (e2e walkthrough)
 tests/       69 unit tests, all mocked at the DockerClient boundary
 ```

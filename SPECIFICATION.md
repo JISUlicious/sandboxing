@@ -218,10 +218,17 @@ identifies a tenant.
 - **SPEC-404** Every successful and failed `exec`, file write, and
   lifecycle transition emits an audit record (tenant, session, actor,
   command/path, exit, duration, timestamp).
-- **SPEC-405** Bearer tokens are stored hashed (Argon2id). Tokens may
-  be rotated by `POST /v1/tenants/me/tokens/rotate`, which
-  authenticates with the current token and returns a new one; the
-  previous token is revoked on the first call after rotation.
+- **SPEC-405** Bearer tokens are stored as `HMAC-SHA256(pepper,
+  plaintext)` so the database never holds plaintext. (Implementation
+  note: HMAC-SHA256 rather than Argon2id because tokens are 32 bytes
+  of randomness — a slow KDF buys nothing on that input space, and
+  HMAC-SHA256 lets the lookup column be indexed.) Tokens may be
+  rotated by `POST /v1/tenants/me/tokens/rotate`: the endpoint
+  authenticates with the current token, returns a new plaintext, and
+  marks the previous token revoked-at = now + 5 min. Both the old
+  and new tokens authenticate during the grace window so callers can
+  switch without an outage; after the window the old token returns
+  401.
 
 ## 8. Observability and SLOs
 

@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     idle_stop_minutes: int = 15
     hard_destroy_hours: int = 24
     reaper_interval_s: int = 60
+    # SPEC-501 — per-session cpu/mem/blkio samples. Set to 0 to disable.
+    resource_sample_interval_s: int = 10
 
     tenant_max_concurrent: int = 50
 

@@ -36,6 +36,7 @@ from api.models import (
 )
 from api.reaper import Reaper
 from api.registry import Registry, SessionRow
+from api.sampler import SessionSampler
 from api.sessions import SessionService
 
 logging.basicConfig(
@@ -160,6 +161,12 @@ def create_app(
         registry=service_.registry, docker=service_.docker, audit=service_.audit
     )
     reaper_ = Reaper(settings=settings_, registry=service_.registry, sessions=service_)
+    sampler_ = SessionSampler(
+        settings=settings_,
+        registry=service_.registry,
+        docker=service_.docker,
+        audit=service_.audit,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -184,9 +191,11 @@ def create_app(
             log.warning("docker daemon not reachable; lifecycle calls will fail")
         if start_reaper:
             await reaper_.start()
+            await sampler_.start()
         try:
             yield
         finally:
+            await sampler_.stop()
             await reaper_.stop()
 
     app = FastAPI(
@@ -199,6 +208,7 @@ def create_app(
     app.state.service = service_
     app.state.settings = settings_
     app.state.reaper = reaper_
+    app.state.sampler = sampler_
 
     @app.middleware("http")
     async def metrics_middleware(request: Request, call_next):

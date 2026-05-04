@@ -259,6 +259,48 @@ class DockerClient:
         except Exception:
             return True
 
+    def container_stats(self, container_id: str) -> dict[str, Any]:
+        """Single-shot stats snapshot (slice 6b). docker-py's
+        `container.stats(stream=False)` returns one dict; we extract
+        the fields the sampler actually uses to avoid pinning callers
+        to docker's full payload shape."""
+        try:
+            raw = self.client.containers.get(container_id).stats(stream=False)
+        except NotFound:
+            return {}
+
+        cpu = raw.get("cpu_stats", {}) or {}
+        precpu = raw.get("precpu_stats", {}) or {}
+        cpu_total = (cpu.get("cpu_usage") or {}).get("total_usage", 0)
+        precpu_total = (precpu.get("cpu_usage") or {}).get("total_usage", 0)
+        sys_total = cpu.get("system_cpu_usage", 0)
+        presys_total = precpu.get("system_cpu_usage", 0)
+        online_cpus = cpu.get("online_cpus") or 1
+        cpu_delta = cpu_total - precpu_total
+        sys_delta = sys_total - presys_total
+        cpu_percent = (cpu_delta / sys_delta) * online_cpus * 100.0 if sys_delta > 0 else 0.0
+
+        mem = raw.get("memory_stats", {}) or {}
+        # Docker reports `usage` minus the cached pages — match what
+        # `docker stats` shows in the CLI.
+        mem_usage = mem.get("usage", 0)
+        cache = (mem.get("stats") or {}).get("cache", 0)
+        mem_used = max(0, mem_usage - cache)
+        mem_limit = mem.get("limit", 0) or 0
+
+        blkio = raw.get("blkio_stats", {}) or {}
+        bytes_io = blkio.get("io_service_bytes_recursive") or []
+        read_bytes = sum(e["value"] for e in bytes_io if e.get("op") in ("Read", "read"))
+        write_bytes = sum(e["value"] for e in bytes_io if e.get("op") in ("Write", "write"))
+
+        return {
+            "cpu_percent": round(cpu_percent, 2),
+            "memory_bytes": int(mem_used),
+            "memory_limit_bytes": int(mem_limit),
+            "blkio_read_bytes": int(read_bytes),
+            "blkio_write_bytes": int(write_bytes),
+        }
+
     # ----- exec (slice 2) -----
 
     def exec_in_container(

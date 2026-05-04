@@ -67,3 +67,21 @@ audit_emit_total = Counter(
     "Audit log records written, labelled by record kind.",
     labelnames=("kind",),
 )
+
+# ----- resource sampler (slice 6b) -----
+
+# Counter, not per-session gauge — per-session labels would explode
+# cardinality on a busy host. Per-session details land in the audit
+# log (`kind="session.sample"`). The aggregate signal here is just
+# "is the sampler healthy".
+resource_samples_total = Counter(
+    "sandbox_resource_samples_total",
+    "Resource samples taken by the per-session sampler.",
+    labelnames=("result",),  # ok | error
+)
+
+resource_sample_duration_seconds = Histogram(
+    "sandbox_resource_sample_duration_seconds",
+    "Wall-clock duration of a single sampler sweep.",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5),
+)

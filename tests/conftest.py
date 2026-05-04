@@ -102,6 +102,23 @@ class FakeDockerClient:
         missing = getattr(self, "_missing_containers", set())
         return container_id not in missing
 
+    # Slice 6b — resource sampler. Returns a fixed snapshot dict; tests
+    # override `_stats_response` per-instance to inject specific values.
+    def container_stats(self, container_id: str) -> dict[str, object]:
+        if container_id in getattr(self, "_missing_containers", set()):
+            return {}
+        return getattr(
+            self,
+            "_stats_response",
+            {
+                "cpu_percent": 1.5,
+                "memory_bytes": 64 * 1024 * 1024,
+                "memory_limit_bytes": 2048 * 1024 * 1024,
+                "blkio_read_bytes": 0,
+                "blkio_write_bytes": 0,
+            },
+        )
+
     # ----- slice 2 -----
 
     def exec_in_container(

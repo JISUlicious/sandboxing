@@ -262,6 +262,7 @@ sudo chown -R sandbox:sandbox /var/lib/sandbox /var/log/sandbox
 
 ```ini
 SANDBOX_API_TOKEN=<32-byte random; openssl rand -hex 32>
+SANDBOX_TOKEN_PEPPER=<32-byte random; openssl rand -hex 32>
 SANDBOX_BIND_HOST=127.0.0.1
 SANDBOX_BIND_PORT=8000
 SANDBOX_DB_PATH=/var/lib/sandbox/sandbox.db
@@ -273,6 +274,37 @@ SANDBOX_QUOTA_TEARDOWN_CMD=/opt/sandbox/deploy/xfs-quota-teardown.sh
 SANDBOX_QUOTA_VOLUME_BASE=/var/lib/sandbox-volumes
 # SANDBOX_DEV_MODE intentionally absent — production posture.
 ```
+
+**Multi-tenant tokens** (slice 7). On first start the service
+bootstraps a `default` tenant from `SANDBOX_API_TOKEN` so existing
+single-token deployments keep working. To add more tenants:
+
+```bash
+sudo -u sandbox uv --directory /opt/sandbox run \
+    python -m tools.sandbox_tenants create alice "Alice's team"
+# Prints the bearer token — save it; the API never returns it again.
+
+sudo -u sandbox uv --directory /opt/sandbox run \
+    python -m tools.sandbox_tenants list
+```
+
+Token rotation goes through the API:
+
+```bash
+curl -X POST -H "Authorization: Bearer $OLD_TOKEN" \
+    http://127.0.0.1:8000/v1/tenants/me/tokens/rotate
+# {"token":"<new>","old_token_grace_seconds":300,"tenant_id":"alice"}
+```
+
+Both old and new tokens authenticate during the 5-minute grace
+window. After that the old token returns 401.
+
+**About `SANDBOX_TOKEN_PEPPER`:** it's HMAC'd with each bearer token
+to produce the hash stored in the `tokens` table — so the database
+never contains plaintext. **Don't rotate the pepper:** it would
+invalidate every existing token. Generate it once with
+`openssl rand -hex 32` and back up `/etc/sandbox/env` (or the entire
+secret-store of your choice).
 
 Wire the quota scripts (copy from `.example`, drop the suffix):
 

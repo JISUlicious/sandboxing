@@ -25,6 +25,23 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_tenant_status ON sessions(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_sessions_activity ON sessions(last_activity_at);
+
+-- Slice 7 — tenants + tokens (SPEC-405).
+CREATE TABLE IF NOT EXISTS tenants (
+    id           TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    created_at   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tokens (
+    id          TEXT PRIMARY KEY,            -- ulid
+    tenant_id   TEXT NOT NULL,
+    hash        TEXT NOT NULL UNIQUE,        -- HMAC-SHA256(pepper, plaintext) hex
+    issued_at   INTEGER NOT NULL,
+    revoked_at  INTEGER,                     -- NULL while active; future ts during grace
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+CREATE INDEX IF NOT EXISTS idx_tokens_tenant ON tokens(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(hash);
 """
 
 # Allowed transitions per ARCH §5.
@@ -239,6 +256,95 @@ class Registry:
             )
             rows = await cur.fetchall()
             return [_row_to_session(r) for r in rows]
+
+    # ----- tenants + tokens (slice 7) -----
+
+    async def create_tenant(self, tenant_id: str, display_name: str) -> None:
+        """Insert a tenant; idempotent on the primary key (no-op if it
+        already exists). The control plane bootstraps the 'default'
+        tenant on startup from settings.api_token."""
+        ts = now_ms()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO tenants (id, display_name, created_at) VALUES (?, ?, ?)",
+                (tenant_id, display_name, ts),
+            )
+            await db.commit()
+
+    async def list_tenants(self) -> Sequence[tuple[str, str, int]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, display_name, created_at FROM tenants ORDER BY created_at"
+            )
+            rows = await cur.fetchall()
+            return [(row["id"], row["display_name"], int(row["created_at"])) for row in rows]
+
+    async def count_tenants(self) -> int:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT COUNT(*) AS n FROM tenants")
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
+
+    async def insert_token(self, *, token_id: str, tenant_id: str, hash_: str) -> None:
+        ts = now_ms()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO tokens (id, tenant_id, hash, issued_at) VALUES (?, ?, ?, ?)",
+                (token_id, tenant_id, hash_, ts),
+            )
+            await db.commit()
+
+    async def lookup_token(self, hash_: str) -> tuple[str, str, int | None] | None:
+        """Return (token_id, tenant_id, revoked_at) for the row matching
+        `hash_`, or None if no such row. The caller decides whether
+        revoked_at puts the token in grace, fully revoked, or active."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, tenant_id, revoked_at FROM tokens WHERE hash = ?",
+                (hash_,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            return (
+                row["id"],
+                row["tenant_id"],
+                int(row["revoked_at"]) if row["revoked_at"] is not None else None,
+            )
+
+    async def revoke_token(self, token_id: str, *, revoke_at_ms: int) -> None:
+        """Mark a token revoked at a specific monotonic timestamp.
+        Setting `revoke_at_ms` in the future creates a grace window."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE tokens SET revoked_at = ? WHERE id = ?",
+                (revoke_at_ms, token_id),
+            )
+            await db.commit()
+
+    async def list_active_tokens(self, tenant_id: str) -> Sequence[tuple[str, int, int | None]]:
+        """All tokens for a tenant where revoked_at is NULL or > now.
+        Returned shape: (token_id, issued_at, revoked_at)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, issued_at, revoked_at FROM tokens "
+                "WHERE tenant_id = ? "
+                "AND (revoked_at IS NULL OR revoked_at > ?)",
+                (tenant_id, now_ms()),
+            )
+            rows = await cur.fetchall()
+            return [
+                (
+                    row["id"],
+                    int(row["issued_at"]),
+                    int(row["revoked_at"]) if row["revoked_at"] is not None else None,
+                )
+                for row in rows
+            ]
 
     async def transition_orphaned(self, session_id: str) -> None:
         """Force a session to STOPPED regardless of current state, used

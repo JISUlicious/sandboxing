@@ -20,6 +20,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from api import metrics
 from api.audit import AuditEmitter
+from api.auth import TokenAuthenticator, bootstrap_default_tenant
 from api.config import Settings, settings
 from api.docker_client import DockerClient
 from api.errors import Unauthorized
@@ -32,6 +33,7 @@ from api.models import (
     ExecResponse,
     FileListResponse,
     FileWriteRequest,
+    RotateTokenResponse,
     SessionResponse,
 )
 from api.reaper import Reaper
@@ -67,6 +69,7 @@ TAGS_METADATA = [
         "description": "Run commands inside a session. Sync and Server-Sent-Events streaming.",
     },
     {"name": "Files", "description": "Read, write, list, and delete files under `/workspace`."},
+    {"name": "Tenants", "description": "Token rotation and other tenant-scoped admin."},
     {"name": "Operations", "description": "Liveness, readiness, and Prometheus metrics."},
 ]
 
@@ -167,6 +170,7 @@ def create_app(
         docker=service_.docker,
         audit=service_.audit,
     )
+    authn_ = TokenAuthenticator(settings=settings_, registry=service_.registry)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -176,6 +180,10 @@ def create_app(
         if not settings_.api_token:
             raise RuntimeError("SANDBOX_API_TOKEN must be set")
         await service_.registry.init()
+        # Bootstrap the default tenant from settings.api_token if no
+        # tenants exist yet (transparent upgrade for single-token
+        # deployments).
+        await bootstrap_default_tenant(settings=settings_, registry=service_.registry, auth=authn_)
         # SPEC-400 (with SPEC-302 dev-mode bypass).
         service_.docker.ensure_runtime()
         if service_.docker.health():
@@ -228,14 +236,34 @@ def create_app(
             )
         return response
 
-    def auth(authorization: str | None = Header(default=None)) -> str:
+    async def auth(authorization: str | None = Header(default=None)) -> str:
         if not authorization or not authorization.startswith("Bearer "):
             raise Unauthorized()
         token = authorization.removeprefix("Bearer ").strip()
-        if token != settings_.api_token:
+        return await authn_.authenticate(token)
+
+    async def auth_with_token_id(
+        authorization: str | None = Header(default=None),
+    ) -> tuple[str, str]:
+        """Same as `auth` but also returns the matched token_id, used
+        by the rotation endpoint so it can revoke the caller's
+        current token without a second lookup."""
+        if not authorization or not authorization.startswith("Bearer "):
             raise Unauthorized()
-        # Slice 1 is single-tenant; multi-tenant token store is slice 4+.
-        return "default"
+        token = authorization.removeprefix("Bearer ").strip()
+        from api.auth import hash_token
+
+        digest = hash_token(token, settings_.token_pepper)
+        row = await service_.registry.lookup_token(digest)
+        if row is None:
+            raise Unauthorized()
+        token_id, tenant_id, revoked_at = row
+        if revoked_at is not None:
+            import time as _time
+
+            if revoked_at <= int(_time.time() * 1000):
+                raise Unauthorized()
+        return tenant_id, token_id
 
     # ----- operations -----
 
@@ -561,6 +589,34 @@ def create_app(
         tenant: str = Depends(auth),
     ) -> None:
         await file_service_.delete(session_id, tenant, path, recursive=recursive)
+
+    # ----- tenants: token rotation (slice 7) -----
+
+    @app.post(
+        "/v1/tenants/me/tokens/rotate",
+        response_model=RotateTokenResponse,
+        tags=["Tenants"],
+        summary="Rotate the calling tenant's bearer token",
+        description=(
+            "Issues a new bearer token for the calling tenant and "
+            "marks the current token revoked-at = now + grace seconds. "
+            "Both tokens authenticate during the grace window so "
+            "callers can read the response and switch over without "
+            "downtime. After the window the old token returns 401. "
+            "SPEC-405."
+        ),
+        responses={**ERR_UNAUTHORIZED},
+    )
+    async def rotate_token(
+        auth_pair: tuple[str, str] = Depends(auth_with_token_id),
+    ) -> RotateTokenResponse:
+        tenant_id, current_token_id = auth_pair
+        new_plaintext, grace = await authn_.rotate(tenant_id, current_token_id)
+        return RotateTokenResponse(
+            token=new_plaintext,
+            old_token_grace_seconds=grace,
+            tenant_id=tenant_id,
+        )
 
     return app
 

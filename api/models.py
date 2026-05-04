@@ -81,3 +81,21 @@ class FileEntry(BaseModel):
 
 class FileListResponse(BaseModel):
     entries: list[FileEntry]
+
+
+# ----- tenants + tokens (SPEC-405) -----
+
+
+class RotateTokenResponse(BaseModel):
+    token: str = Field(
+        description=(
+            "The new bearer token in plaintext. Save it now; the API "
+            "never returns it again. The previous token continues to "
+            "authenticate for `old_token_grace_seconds` so callers "
+            "have time to switch."
+        ),
+    )
+    old_token_grace_seconds: int = Field(
+        description="How long the previous token continues to authenticate.",
+    )
+    tenant_id: str

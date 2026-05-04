@@ -11,6 +11,19 @@ class Settings(BaseSettings):
     bind_host: str = "127.0.0.1"
     bind_port: int = 8000
 
+    # Slice 7 — multi-tenant identity (SPEC-405).
+    # token_pepper is HMAC'd with the bearer token to produce the hash
+    # stored in the tokens table; rotating it invalidates ALL tokens
+    # so set it once and never change. Generate via:
+    #     openssl rand -hex 32
+    # Required when multi-tenant is in play; left empty in unit-test
+    # configs so the default ("") is hashed deterministically.
+    token_pepper: str = ""
+    # Grace period after rotation during which the old token still
+    # authenticates. SPEC-405 has no specific number; 5 minutes is
+    # a reasonable client refresh window.
+    token_grace_seconds: int = 300
+
     db_path: Path = Path("./var/sandbox.db")
     audit_log_path: Path = Path("./var/audit.log")
     audit_fallback_log_path: Path | None = None  # default: <audit_log>.fallback.jsonl

@@ -1,0 +1,100 @@
+# deploy/prometheus/alerts.yml — Prometheus alert rules for the
+# sandbox service. Drop into your existing rule_files: list. These
+# fire on `up` if a Prometheus + Alertmanager stack is configured;
+# slice 8 doesn't ship a paging integration (out of scope per the
+# semi-prod plan), so wire severities to whatever your team uses.
+#
+# Reference SLOs come from SPECIFICATION.md §8.
+
+groups:
+  - name: sandbox-service
+    interval: 30s
+    rules:
+
+      - alert: SandboxAuditUnhealthy
+        # Audit fail-closed (ARCH §7) is buffering records and possibly
+        # spilling to the fallback file. The service is rejecting new
+        # mutations until reconciled.
+        expr: sandbox_audit_emit_total > 0 and sandbox_audit_emit_total{kind="audit.heartbeat"} == 0 and increase(sandbox_audit_emit_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: sandbox
+        annotations:
+          summary: "Sandbox audit log unhealthy for >5 minutes"
+          description: |
+            Audit emit_total has stopped advancing and recovery
+            heartbeat hasn't fired. Mutating endpoints are returning
+            503 audit_unhealthy. Operator action: check the audit
+            fallback file and disk space on the audit log volume.
+            Reconcile via `chmod 0640 /var/log/sandbox/audit.log` or
+            similar before the buffer overflows to the fallback file.
+
+      - alert: SandboxExecP95Breach
+        # SPEC-502 — exec overhead p95 < 50 ms target. If we're
+        # consistently above 100 ms the SLO is gone.
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(sandbox_exec_duration_seconds_bucket{result="ok"}[10m]))
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: sandbox
+        annotations:
+          summary: "Exec p95 latency above SPEC-502 SLO"
+          description: |
+            Exec p95 has been > 100 ms for 10 minutes (SPEC-502 target
+            is 50 ms). Check Docker daemon load, container churn, and
+            whether gVisor is in syscall-heavy paths.
+
+      - alert: SandboxCreateP95Breach
+        # SPEC-502 — session create p95 < 3 s. Alarm at 2x.
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(sandbox_session_create_seconds_bucket[10m]))
+          ) > 6
+        for: 10m
+        labels:
+          severity: warning
+          service: sandbox
+        annotations:
+          summary: "Session create p95 latency above SLO"
+          description: |
+            Create p95 above 6 s for 10 minutes (SPEC-502 target 3 s).
+            Likely causes: image not pre-pulled, Docker daemon
+            saturated, XFS quota script failing.
+
+      - alert: SandboxDestroyingStuck
+        # ARCH-051 4-step destroy is supposed to complete fast; if any
+        # row sits in DESTROYING for more than 5 minutes the reconciler
+        # is broken or the docker daemon is hung.
+        expr: sandbox_sessions_by_status{status="DESTROYING"} > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: sandbox
+        annotations:
+          summary: "Session(s) stuck in DESTROYING"
+          description: |
+            One or more rows have been in DESTROYING for more than 5
+            minutes. Inspect the sandbox-api log for repeated
+            "destroy failed" lines; the slice-6a reconciler retries
+            on every restart but won't help if Docker is hung.
+
+      - alert: SandboxReadyzDocker
+        # Docker daemon unreachable from the control plane.
+        expr: |
+          increase(sandbox_api_requests_total{path="/readyz",status="200"}[5m]) > 0
+          and on() absent(sandbox_audit_emit_total{kind="session.create"})
+        for: 5m
+        labels:
+          severity: critical
+          service: sandbox
+        annotations:
+          summary: "Sandbox API up but no sessions can be created"
+          description: |
+            /readyz is being scraped (so the API is live) but no
+            session.create audit has fired in 5 minutes. Either no
+            traffic, or Docker is down — check `/readyz` body
+            (`{"docker": false}`) and the audit log.

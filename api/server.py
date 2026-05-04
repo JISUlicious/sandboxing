@@ -218,6 +218,15 @@ def create_app(
     app.state.reaper = reaper_
     app.state.sampler = sampler_
 
+    # Slice 8e: TLS-readiness — when running behind a reverse proxy
+    # that terminates TLS (Caddy / nginx in deploy/tls/*.example),
+    # honor X-Forwarded-{Proto,For,Host}. Off by default so direct
+    # callers can't spoof those headers.
+    if settings_.trust_proxy_headers:
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
     @app.middleware("http")
     async def metrics_middleware(request: Request, call_next):
         start = time.monotonic()

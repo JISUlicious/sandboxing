@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     # a reasonable client refresh window.
     token_grace_seconds: int = 300
 
+    # TLS-readiness (slice 8e). The control plane stays plain HTTP on
+    # 127.0.0.1; an upstream reverse proxy (Caddy / nginx) terminates
+    # TLS and forwards. Set this True only when running BEHIND such a
+    # proxy — otherwise spoofed X-Forwarded-* headers would let any
+    # caller fake their source IP / scheme.
+    trust_proxy_headers: bool = False
+
     db_path: Path = Path("./var/sandbox.db")
     audit_log_path: Path = Path("./var/audit.log")
     audit_fallback_log_path: Path | None = None  # default: <audit_log>.fallback.jsonl

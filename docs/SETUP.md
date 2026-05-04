@@ -5,6 +5,14 @@ isolation, ~10 min) and **Production** (SPEC-400 / SPEC-302 / SPEC-401
 hardening, ~30 min plus slice-5 work). VM-specific differences are
 flagged inline.
 
+ > **If you just want a working production install, use the Compose
+> path: [DEPLOY.md](./DEPLOY.md).** It pulls prebuilt images from
+> `ghcr.io/JISUlicious/sandbox-*` and brings up the full stack with
+> XFS-quota feature parity. This document is the reference for
+> *what every step does* (and the path for non-apt distros, custom
+> systemd integrations, or anyone who can't grant `userns_mode:
+> host` to a container).
+>
 > Once the service is up, see [`MCP.md`](./MCP.md) for connecting
 > Claude Code / Desktop / Cursor to the `/mcp` endpoint.
 

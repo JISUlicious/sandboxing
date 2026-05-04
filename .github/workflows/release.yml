@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-push:
+    name: build + push ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: runtime
+            context: sandbox
+            dockerfile: sandbox/Dockerfile
+          - image: proxy
+            context: proxy
+            dockerfile: proxy/Dockerfile
+          - image: control-plane
+            context: .
+            dockerfile: Dockerfile.control-plane
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ${{ github.repository }} preserves the org/user case of the
+      # source repo (e.g. JISUlicious/sandboxing); GHCR requires the
+      # image path to be lowercased.
+      - name: Compute lowercase image path
+        id: img
+        run: |
+          owner_lc=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "ref=ghcr.io/${owner_lc}/sandbox-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.ref }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+
+      - name: Build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          # amd64-only for v1: runsc has no arm64 binaries (SPEC-400),
+          # so shipping arm64 for proxy/control-plane only would
+          # mislead users into thinking the runtime works on ARM.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  release:
+    name: GitHub Release
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # softprops needs history for changelog generation
+
+      - name: Compute lowercase repo for body
+        id: repo
+        run: |
+          owner_lc=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lc=${owner_lc}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Images
+
+            ```
+            ghcr.io/${{ steps.repo.outputs.owner_lc }}/sandbox-runtime:${{ github.ref_name }}
+            ghcr.io/${{ steps.repo.outputs.owner_lc }}/sandbox-proxy:${{ github.ref_name }}
+            ghcr.io/${{ steps.repo.outputs.owner_lc }}/sandbox-control-plane:${{ github.ref_name }}
+            ```
+
+            Same images are also published as `:latest`.
+
+            ## Quick-start
+
+            See [docs/DEPLOY.md](./docs/DEPLOY.md) for the Compose
+            walkthrough or [docs/SETUP.md](./docs/SETUP.md) for the
+            systemd path.
+
+            ```
+            sudo deploy/setup-host.sh --full
+            sudo cp deploy/.env.compose.example /etc/sandbox/env
+            sudoedit /etc/sandbox/env
+            SANDBOX_VERSION=${{ github.ref_name }} docker compose up -d
+            ```
+
+            ## Architecture: linux/amd64
+
+            runsc (gVisor) has no arm64 binaries today. Multi-arch is
+            tracked but not in this release.
+
+            ---

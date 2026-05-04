@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import posixpath
 import socket as _socket
 import tarfile
@@ -187,10 +188,17 @@ class DockerClient:
         if str(bind_base):
             bind_path = bind_base / session_id
             bind_path.mkdir(parents=True, exist_ok=True)
-            # Container runs as UID 10001 (ARCH-032); make the bind
-            # writable. 0777 is a stopgap; production should pre-chown
-            # to the userns-remap'd subuid that 10001 lands on.
-            bind_path.chmod(0o777)
+            # SPEC-401: with userns-remap, container UID 10001 lands on
+            # a host subuid (e.g. 110001). Chown the bind to that UID +
+            # 0700 so the workspace is writable to the agent only.
+            uid = self._settings.bind_volume_uid
+            if uid is not None:
+                os.chown(bind_path, uid, uid)
+                bind_path.chmod(0o700)
+            else:
+                # Dev / non-userns-remap fallback. The lifespan logs a
+                # one-time warning recommending bind_volume_uid.
+                bind_path.chmod(0o777)
             self.client.volumes.create(
                 name=volume_name,
                 driver="local",

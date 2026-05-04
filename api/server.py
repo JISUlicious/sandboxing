@@ -179,6 +179,19 @@ def create_app(
             raise RuntimeError("dev mode forbids non-loopback bind (SPEC-302)")
         if not settings_.api_token:
             raise RuntimeError("SANDBOX_API_TOKEN must be set")
+        # SPEC-401: warn loudly when bind volumes fall back to 0777 in
+        # production. Dev mode opts out (no quota_volume_base means no
+        # bind, no chmod path).
+        if (
+            not settings_.dev_mode
+            and str(settings_.quota_volume_base)
+            and settings_.bind_volume_uid is None
+        ):
+            log.warning(
+                "SANDBOX_BIND_VOLUME_UID not set; per-session volumes will "
+                "fall back to mode 0777 (SPEC-401 footgun). Compute via: "
+                "awk -F: '$1==\"dockremap\"{print $2 + 10000}' /etc/subuid"
+            )
         await service_.registry.init()
         # Bootstrap the default tenant from settings.api_token if no
         # tenants exist yet (transparent upgrade for single-token

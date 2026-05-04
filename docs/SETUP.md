@@ -272,6 +272,11 @@ SANDBOX_EGRESS_PROXY_URL=http://172.30.0.2:3128
 SANDBOX_QUOTA_SETUP_CMD=/opt/sandbox/deploy/xfs-quota-setup.sh
 SANDBOX_QUOTA_TEARDOWN_CMD=/opt/sandbox/deploy/xfs-quota-teardown.sh
 SANDBOX_QUOTA_VOLUME_BASE=/var/lib/sandbox-volumes
+# SPEC-401 — host UID that maps to container UID 10001 under
+# userns-remap=default. setup-host.sh fills this in automatically;
+# compute manually with:
+#   awk -F: '$1=="dockremap"{print $2 + 10000}' /etc/subuid
+SANDBOX_BIND_VOLUME_UID=110001
 # SANDBOX_DEV_MODE intentionally absent — production posture.
 ```
 
@@ -306,7 +311,10 @@ invalidate every existing token. Generate it once with
 `openssl rand -hex 32` and back up `/etc/sandbox/env` (or the entire
 secret-store of your choice).
 
-Wire the quota scripts (copy from `.example`, drop the suffix):
+Wire the quota scripts (copy from `.example`, drop the suffix). The
+heavy lifting now lives in `deploy/sandbox-quota-helper.sh`, installed
+to `/usr/local/bin` with a single, locked-down sudoers entry — see
+slice 9 below. The `setup-host.sh` script handles all of that for you.
 
 ```bash
 sudo cp /opt/sandbox/deploy/xfs-quota-setup.sh.example \
@@ -314,50 +322,43 @@ sudo cp /opt/sandbox/deploy/xfs-quota-setup.sh.example \
 sudo cp /opt/sandbox/deploy/xfs-quota-teardown.sh.example \
        /opt/sandbox/deploy/xfs-quota-teardown.sh
 sudo chmod +x /opt/sandbox/deploy/xfs-quota-{setup,teardown}.sh
-
-# The scripts use sudo to run xfs_quota and edit /etc/projects.
-# Add a sudoers entry for the sandbox user:
-echo "sandbox ALL=(root) NOPASSWD: /usr/sbin/xfs_quota, /usr/bin/sed, /usr/bin/tee, /usr/bin/touch" \
-    | sudo tee /etc/sudoers.d/sandbox-xfs-quota
-sudo chmod 0440 /etc/sudoers.d/sandbox-xfs-quota
 ```
 
 The Docker volume layout differs from the default in production: when
 `quota_volume_base` is set, the control plane creates each session's
-volume as a bind mount onto `$volume_base/<session_id>` (mode `0777`
-so container UID 10001 can write through). That's what makes the XFS
-project quota actually apply — Docker's default `/var/lib/docker/volumes`
-location is usually on a non-prjquota filesystem.
+volume as a bind mount onto `$volume_base/<session_id>`. That's what
+makes the XFS project quota actually apply — Docker's default
+`/var/lib/docker/volumes` location is usually on a non-prjquota
+filesystem. With `SANDBOX_BIND_VOLUME_UID` set (slice 9), the bind dir
+is chown'd to the dockremap-mapped UID and chmod 0700; without it, the
+control plane falls back to mode 0777 and logs a startup warning.
 
-`/etc/systemd/system/sandbox-api.service`:
-
-```ini
-[Unit]
-Description=Sandbox Service control plane
-After=docker.service network-online.target
-Requires=docker.service
-
-[Service]
-Type=simple
-User=sandbox
-Group=sandbox
-WorkingDirectory=/opt/sandbox
-EnvironmentFile=/etc/sandbox/env
-ExecStart=/opt/sandbox/.venv/bin/uvicorn api.server:app --host 127.0.0.1 --port 8000
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+Apply the hardened systemd unit + sudoers helper + logrotate + audit
+log immutability with the slice-9 bootstrap:
 
 ```bash
-sudo systemctl daemon-reload
+sudo /opt/sandbox/deploy/setup-host.sh
 sudo systemctl enable --now sandbox-api
 sudo journalctl -u sandbox-api -f
 curl -H 'Authorization: Bearer '"$(sudo grep API_TOKEN /etc/sandbox/env | cut -d= -f2)" \
     http://127.0.0.1:8000/healthz
 ```
+
+`setup-host.sh` is idempotent (re-run safe). It:
+
+1. Computes `SANDBOX_BIND_VOLUME_UID` from `/etc/subuid` (`dockremap`
+   start + 10000) and writes it into `/etc/sandbox/env`.
+2. Installs `/usr/local/bin/sandbox-quota-helper` and writes a
+   single-line sudoers grant to `/etc/sudoers.d/sandbox-quota-helper`.
+   Removes the legacy wildcard `sandbox-xfs-quota` entry if found.
+3. Installs `/etc/logrotate.d/sandbox` and `chattr +a` the audit log.
+4. Enforces `0640 root:sandbox` on `/etc/sandbox/env`.
+5. Installs the hardened `sandbox-api.service` (the unit lives in
+   `deploy/sandbox-api.service` — runs as root with a tight
+   `CapabilityBoundingSet`, `NoNewPrivileges`, `ProtectSystem=strict`,
+   etc.).
+
+Use `sudo deploy/setup-host.sh --check` to dry-run without changes.
 
 ### 7 · Pre-pull the sandbox image at boot (ARCH-033)
 
@@ -412,12 +413,22 @@ end of the script: copy the `.bak` env file back and restart.
 - [ ] `docker info | grep runsc` shows runsc registered.
 - [ ] `docker info | grep -i userns` shows userns-remap=default.
 - [ ] `/var/lib/sandbox-volumes` is XFS or ext4 + prjquota.
-- [ ] `sandbox` user is non-root, only in the `docker` group.
+- [ ] `SANDBOX_BIND_VOLUME_UID` is set in `/etc/sandbox/env`
+      (= dockremap subuid start + 10000); session bind dirs are mode
+      `0700` not `0777`.
 - [ ] API bound to `127.0.0.1` (or behind a reverse proxy with TLS).
 - [ ] `/metrics` scraping restricted to internal network.
 - [ ] `sandbox-runtime:latest` pre-pulled at boot.
-- [ ] Audit log directory writable by `sandbox` user, rotated daily.
+- [ ] `lsattr /var/log/sandbox/audit.log` shows the `a` attribute
+      (immutable-append).
+- [ ] `/etc/logrotate.d/sandbox` is installed; daily rotation keeps
+      the `+a` bit.
 - [ ] `/etc/sandbox/env` mode `0640`, owned `root:sandbox`.
+- [ ] `/etc/sudoers.d/sandbox-quota-helper` is the ONLY sudoers grant
+      for the `sandbox` user (no wildcard `sed`/`tee`/`touch`).
+- [ ] `systemctl show sandbox-api.service | grep NoNewPrivileges` is
+      `yes`; `ProtectSystem=strict`; capability set is just
+      `CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER`.
 
 ---
 

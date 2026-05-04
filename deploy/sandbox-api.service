@@ -1,0 +1,47 @@
+[Unit]
+Description=Sandbox Service control plane
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# Runs as root so docker_client.create_volume can chown bind dirs to
+# the dockremap-mapped UID without a sudo round-trip. The capability
+# bounding set below drops everything except the three caps that
+# chown + audit log fsync + bind-dir mode adjustments need.
+# Threat model: control plane already speaks to docker.sock (=> root
+# on host), so User=root doesn't widen the existing blast radius.
+User=root
+Group=root
+WorkingDirectory=/opt/sandbox
+EnvironmentFile=/etc/sandbox/env
+ExecStart=/opt/sandbox/.venv/bin/uvicorn api.server:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+# --- slice 9-4 hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/sandbox /var/log/sandbox /var/lib/sandbox-volumes /etc/sandbox
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+LockPersonality=true
+SystemCallArchitectures=native
+# Caps reasoning:
+#   CAP_CHOWN        - os.chown(bind_path, dockremap_uid, dockremap_uid)
+#   CAP_DAC_OVERRIDE - read /etc/sandbox/env (group-readable but
+#                      Protect* layers force this), write audit fallback
+#                      log, write registry SQLite WAL
+#   CAP_FOWNER       - chmod 0700 on bind dirs whose owner != euid
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+
+[Install]
+WantedBy=multi-user.target

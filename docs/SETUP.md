@@ -473,8 +473,35 @@ The service has four pieces of on-disk state:
 
 ### Backup
 
-Take a consistent snapshot when traffic is quiet (or briefly stop the
-service):
+**Automated nightly backup (recommended).** The repo ships a
+self-contained backup script + systemd timer:
+
+```bash
+# Install the timer + service.
+sudo cp /opt/sandbox/deploy/sandbox-backup.{service,timer} /etc/systemd/system/
+sudo cp /opt/sandbox/deploy/backup.env.example /etc/sandbox/backup.env  # optional overrides
+sudo systemctl daemon-reload
+sudo systemctl enable --now sandbox-backup.timer
+
+# Verify the timer is scheduled.
+systemctl list-timers sandbox-backup.timer
+# Next: Sun 2026-05-04 03:17:00 KST
+
+# Force a one-shot run to populate the first backup.
+sudo systemctl start sandbox-backup.service
+journalctl -u sandbox-backup.service -n 30 --no-pager
+ls -la /var/backups/sandbox/
+```
+
+The timer fires daily at 03:17 (with a 5-minute jitter). Each run
+stops the API briefly (~5–10 s), takes a consistent snapshot of the
+registry, audit log, loopback image, and env file, then restarts the
+API. Old backups beyond `BACKUP_KEEP_N` (default 14) are removed.
+
+Override defaults via `/etc/sandbox/backup.env` (sample at
+`deploy/backup.env.example`).
+
+**Manual on-demand snapshot.** Same flow without the timer:
 
 ```bash
 sudo systemctl stop sandbox-api      # ~5 s grace; in-flight calls drain
@@ -506,6 +533,60 @@ elsewhere) — the volume mount path is exposed by Docker:
 VOL=$(docker volume inspect sandbox-vol-<session-id> -f '{{.Mountpoint}}')
 sudo tar -C "$VOL" -czf /path/to/session.tgz .
 ```
+
+### Restore drill
+
+Walk through this **once** after enabling backups, and re-run quarterly,
+to make sure the procedure is correct on your specific host. The
+recovery time objective on a tested drill is ~2 minutes for the
+service to be back up; cleanup of orphaned rows is automatic via the
+slice-6a startup reconciliation.
+
+```bash
+# 0. Sanity: pick the backup you'll restore (latest is usually fine).
+BACKUP=$(ls -td /var/backups/sandbox/sandbox-* | head -1)
+echo "restoring from: $BACKUP"
+
+# 1. Stop the service AND prevent the timer from firing during the drill.
+sudo systemctl stop sandbox-api
+sudo systemctl stop sandbox-backup.timer
+
+# 2. Wipe production state. (DANGEROUS — only on the box you're drilling.)
+sudo umount /var/lib/sandbox-volumes
+sudo rm -f /var/lib/sandbox-fs.img
+sudo rm -f /var/lib/sandbox/sandbox.db
+sudo rm -rf /var/log/sandbox/audit.log*
+
+# 3. Restore from backup.
+sudo cp --sparse=always "$BACKUP/sandbox-fs.img" /var/lib/sandbox-fs.img
+sudo mount /var/lib/sandbox-volumes
+sudo cp "$BACKUP/sandbox.db" /var/lib/sandbox/sandbox.db
+sudo cp -a "$BACKUP"/audit.log* /var/log/sandbox/ 2>/dev/null || true
+sudo chown -R "$USER":"$USER" /var/lib/sandbox /var/log/sandbox
+
+# 4. Start the service. Lifespan's startup reconciliation will mark
+#    every non-terminal row STOPPED (their containers are gone now).
+sudo systemctl start sandbox-api
+journalctl -u sandbox-api -n 20 --no-pager | grep -i reconcile
+# Expect: "reconcile_on_startup: done (finished_destroy=N orphaned=M)"
+
+# 5. Verify the registry returned with prior session metadata.
+TOKEN=$(sudo grep API_TOKEN /etc/sandbox/env | cut -d= -f2)
+curl -sS http://127.0.0.1:8000/healthz
+# Browse a known session id from before the drill:
+curl -sS -H "Authorization: Bearer $TOKEN" \
+    http://127.0.0.1:8000/v1/sessions/<old-session-id>
+# Expect: 200 OK with status="STOPPED" (volume preserved; container gone).
+
+# 6. Re-enable the backup timer.
+sudo systemctl start sandbox-backup.timer
+```
+
+Sessions that existed before the drill come back as `STOPPED`. The
+agent can resume them — slice 6a's reconciliation marked the rows
+`STOPPED`, and the existing transparent-resume code path on
+`/exec` (or `/files`) will create a fresh container that re-attaches
+to the preserved `/workspace` volume.
 
 ### Restore
 

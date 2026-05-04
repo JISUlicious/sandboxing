@@ -1,0 +1,25 @@
+[Unit]
+Description=Sandbox Service nightly backup
+Documentation=https://github.com/JISUlicious/sandboxing/blob/main/docs/SETUP.md
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Edit if your repo lives elsewhere:
+ExecStart=/opt/sandbox/deploy/backup.sh
+EnvironmentFile=-/etc/sandbox/backup.env
+# Don't propagate failures to the timer — a transient backup failure
+# shouldn't disable the timer; the operator gets a journalctl entry.
+SuccessExitStatus=0
+
+# A backup pause shouldn't be too long; cap at 10 min.
+TimeoutStartSec=10min
+
+# Don't run if the system is heavily loaded.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

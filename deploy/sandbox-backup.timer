@@ -1,0 +1,16 @@
+[Unit]
+Description=Nightly sandbox backup timer
+Documentation=https://github.com/JISUlicious/sandboxing/blob/main/docs/SETUP.md
+
+[Timer]
+# Default: 03:17 local time every day. Off-peak; far from cron's
+# typical hour-aligned slots so we don't pile on with other jobs.
+OnCalendar=*-*-* 03:17:00
+# If the system was off at the scheduled time, run on next boot.
+Persistent=true
+# +/- 5 minute jitter so multiple hosts don't all back up exactly at once.
+RandomizedDelaySec=5min
+Unit=sandbox-backup.service
+
+[Install]
+WantedBy=timers.target

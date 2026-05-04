@@ -1,0 +1,29 @@
+# Sandbox egress allowlist. One pattern per line. # for comments.
+#
+# Squid `dstdomain` patterns:
+#   - `example.com`   matches example.com AND every subdomain
+#                     (e.g. example.com, foo.example.com, bar.foo.example.com)
+#   - `.example.com`  matches subdomains ONLY (foo.example.com),
+#                     NOT the bare example.com itself.
+#
+# Use the no-dot form unless you specifically want to deny the bare
+# domain. Squid 6+ treats `.example.com` plus `example.com` as
+# redundant and refuses to start.
+#
+# An EMPTY file means "deny everything" — use that as the locked-down
+# production default and only allow what your agent actually needs.
+
+# --- Python packaging ---
+pypi.org
+pythonhosted.org
+
+# --- Node packaging ---
+npmjs.org
+
+# --- Git / GitHub ---
+github.com
+githubusercontent.com
+
+# --- General trust roots ---
+python.org
+debian.org

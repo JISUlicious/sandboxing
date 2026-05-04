@@ -1,0 +1,21 @@
+[Unit]
+Description=Sandbox egress iptables rules (DOCKER-USER chain)
+# DOCKER-USER lives in the docker daemon's iptables init; we run after
+# Docker is up so the chain exists.
+After=docker.service network-online.target
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Edit the path below if the repo lives elsewhere on the host.
+EnvironmentFile=-/etc/sandbox/iptables.env
+ExecStart=/opt/sandbox/deploy/iptables-setup.sh
+# Re-apply after docker restarts so the rules survive a daemon bounce
+# (Docker can flush its own table on reload, though DOCKER-USER is
+# normally preserved — the redundancy is cheap insurance).
+ExecStartPost=/bin/sh -c 'echo "sandbox iptables applied at $(date -Iseconds)"'
+
+[Install]
+WantedBy=multi-user.target

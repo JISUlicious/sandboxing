@@ -1,0 +1,1579 @@
+{
+  "components": {
+    "schemas": {
+      "CreateSessionRequest": {
+        "properties": {
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Limits"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "CreateSessionRequest",
+        "type": "object"
+      },
+      "ErrorDetail": {
+        "properties": {
+          "code": {
+            "description": "Stable machine-readable error code. See SPEC \u00a79.",
+            "examples": [
+              "session_not_found"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable explanation; safe to log.",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetail",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "ExecRequest": {
+        "properties": {
+          "argv": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Argv",
+            "type": "array"
+          },
+          "env": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env"
+          },
+          "stdin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stdin"
+          },
+          "timeout_s": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout S"
+          }
+        },
+        "required": [
+          "argv"
+        ],
+        "title": "ExecRequest",
+        "type": "object"
+      },
+      "ExecResponse": {
+        "properties": {
+          "duration_ms": {
+            "title": "Duration Ms",
+            "type": "integer"
+          },
+          "effective_timeout_s": {
+            "title": "Effective Timeout S",
+            "type": "integer"
+          },
+          "exit_code": {
+            "title": "Exit Code",
+            "type": "integer"
+          },
+          "stderr": {
+            "title": "Stderr",
+            "type": "string"
+          },
+          "stdout": {
+            "title": "Stdout",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "truncated_streams": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Truncated Streams",
+            "type": "array"
+          }
+        },
+        "required": [
+          "stdout",
+          "stderr",
+          "exit_code",
+          "duration_ms",
+          "effective_timeout_s"
+        ],
+        "title": "ExecResponse",
+        "type": "object"
+      },
+      "FileEntry": {
+        "properties": {
+          "is_dir": {
+            "title": "Is Dir",
+            "type": "boolean"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "is_dir",
+          "size",
+          "mode"
+        ],
+        "title": "FileEntry",
+        "type": "object"
+      },
+      "FileListResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/FileEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "title": "FileListResponse",
+        "type": "object"
+      },
+      "FileWriteRequest": {
+        "properties": {
+          "content_b64": {
+            "title": "Content B64",
+            "type": "string"
+          },
+          "mode": {
+            "default": 416,
+            "maximum": 511.0,
+            "minimum": 0.0,
+            "title": "Mode",
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content_b64"
+        ],
+        "title": "FileWriteRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "Limits": {
+        "properties": {
+          "exec_timeout_s": {
+            "default": 60,
+            "minimum": 1.0,
+            "title": "Exec Timeout S",
+            "type": "integer"
+          },
+          "memory_mib": {
+            "default": 2048,
+            "minimum": 64.0,
+            "title": "Memory Mib",
+            "type": "integer"
+          },
+          "nofile": {
+            "default": 1024,
+            "minimum": 64.0,
+            "title": "Nofile",
+            "type": "integer"
+          },
+          "pids": {
+            "default": 256,
+            "minimum": 16.0,
+            "title": "Pids",
+            "type": "integer"
+          },
+          "vcpu": {
+            "default": 2,
+            "minimum": 1.0,
+            "title": "Vcpu",
+            "type": "integer"
+          },
+          "workspace_mib": {
+            "default": 1024,
+            "minimum": 64.0,
+            "title": "Workspace Mib",
+            "type": "integer"
+          }
+        },
+        "title": "Limits",
+        "type": "object"
+      },
+      "RotateTokenResponse": {
+        "properties": {
+          "old_token_grace_seconds": {
+            "description": "How long the previous token continues to authenticate.",
+            "title": "Old Token Grace Seconds",
+            "type": "integer"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "token": {
+            "description": "The new bearer token in plaintext. Save it now; the API never returns it again. The previous token continues to authenticate for `old_token_grace_seconds` so callers have time to switch.",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "old_token_grace_seconds",
+          "tenant_id"
+        ],
+        "title": "RotateTokenResponse",
+        "type": "object"
+      },
+      "SessionResponse": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "last_activity_at": {
+            "title": "Last Activity At",
+            "type": "integer"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/Limits"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "CREATING",
+              "RUNNING",
+              "IDLE",
+              "STOPPED",
+              "DESTROYING",
+              "DESTROYED"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "tenant_id",
+          "limits",
+          "created_at",
+          "last_activity_at"
+        ],
+        "title": "SessionResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "\nControl plane for an LLM-agent sandbox service. See\n[SPECIFICATION.md](https://github.com/JISUlicious/sandboxing/blob/main/SPECIFICATION.md)\nand\n[ARCHITECTURE.md](https://github.com/JISUlicious/sandboxing/blob/main/ARCHITECTURE.md)\nfor the full contract.\n\nEvery session is a long-lived, hardened container. Filesystem state in\n`/workspace` persists across exec calls and across stop/resume; process\nstate does not (SPEC-002). All endpoints under `/v1/sessions` require a\nbearer token in the `Authorization` header.\n",
+    "title": "Sandbox Service",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/healthz": {
+      "get": {
+        "description": "Returns 200 as long as the process is up. Does not check Docker \u2014 see `/readyz`.",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Healthz Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Liveness probe",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "description": "Prometheus text exposition (SPEC-503). No auth \u2014 bind to an internal port or restrict via reverse proxy in production.",
+        "operationId": "metrics_endpoint_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {}
+            },
+            "description": "Metrics in Prometheus exposition format."
+          }
+        },
+        "summary": "Prometheus metrics",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Returns the health of subsystems the API needs to serve mutations: `docker` for the daemon, `audit` for the fail-closed audit log (ARCH \u00a77). All-true means the service will accept new lifecycle / exec / file calls.",
+        "operationId": "readyz_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Readyz Readyz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Readiness probe",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/v1/sessions": {
+      "post": {
+        "description": "Creates a long-lived sandbox session under the calling tenant. Starts in `RUNNING` with an empty `/workspace` (SPEC-101). `limits` are merged with tenant-default values; per-field caps are enforced (SPEC-100, SPEC-300).",
+        "operationId": "create_session_v1_sessions_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Tenant concurrency or per-field limit exceeded (`limit_exceeded`). SPEC \u00a76."
+          }
+        },
+        "summary": "Create a session",
+        "tags": [
+          "Sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}": {
+      "delete": {
+        "description": "Removes the container and its `/workspace` volume. Irreversible (SPEC-105). The destroy is multi-step (DESTROYING \u2192 DESTROYED) and idempotent on partial failure (ARCH-051).",
+        "operationId": "destroy_session_v1_sessions__session_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Destroy a session",
+        "tags": [
+          "Sessions"
+        ]
+      },
+      "get": {
+        "operationId": "get_session_v1_sessions__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get a session's status and limits",
+        "tags": [
+          "Sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/exec": {
+      "post": {
+        "description": "Runs `argv` inside the session and returns stdout/stderr/exit after the process exits or `timeout_s` is hit. Output is capped at 8 MiB per stream independently (SPEC-203); `truncated_streams` lists any that hit the cap. Stdin must be UTF-8 \u2264 1 MiB; binary stdin is a future enhancement.\n\nSTOPPED / IDLE sessions are transparently resumed before the exec runs (SPEC-104). `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` are forbidden in `env` (SPEC-201).",
+        "operationId": "exec_session_v1_sessions__session_id__exec_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Exec exceeded its wall-clock budget (`exec_timeout`). SPEC-201."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session is in a state that doesn't allow this operation (`invalid_state`)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run a command (synchronous)",
+        "tags": [
+          "Exec"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/exec/stream": {
+      "post": {
+        "description": "Same contract as `/exec` but streams output live as SSE events.\n\n**Event types** (each is an SSE frame with `event:` + `data:`):\n- `event: stdout` / `event: stderr` \u2014 `{\"chunk_b64\": \"<base64>\"}`. Decoded chunks reconstruct the original byte stream in order. Once the per-stream 8 MiB cap is hit, no further chunks of that stream are emitted.\n- `event: truncated` \u2014 `{\"stream\": \"stdout\"|\"stderr\"}`. Emitted exactly once per affected stream when the cap is reached.\n- `event: result` \u2014 final ExecResponse-shaped payload (matches the synchronous `/exec` response, SPEC-201/202).\n- `event: error` \u2014 `{\"message\": \"...\"}`. The producer thread crashed; the client should treat this as a 5xx.\n\nStdin is rejected with 400 \u2014 combining stdin with live demuxed streaming is a future slice. OpenAPI tooling does not generate useful clients for SSE; consume with a streaming HTTP client.",
+        "operationId": "exec_session_stream_v1_sessions__session_id__exec_stream_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {}
+            },
+            "description": "SSE stream of stdout/stderr/truncated/result events."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session is in a state that doesn't allow this operation (`invalid_state`)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run a command (Server-Sent Events streaming)",
+        "tags": [
+          "Exec"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/files": {
+      "get": {
+        "description": "Lists immediate children of `dir` (relative to `/workspace`; default is `/workspace` itself).",
+        "operationId": "list_files_v1_sessions__session_id__files_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Path relative to `/workspace`. Empty = list `/workspace`.",
+            "in": "query",
+            "name": "dir",
+            "required": false,
+            "schema": {
+              "default": "",
+              "description": "Path relative to `/workspace`. Empty = list `/workspace`.",
+              "title": "Dir",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session or file not found (`session_not_found` / `file_not_found`)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List files in a directory",
+        "tags": [
+          "Files"
+        ]
+      },
+      "post": {
+        "description": "Writes a single file into `/workspace`. `content_b64` is base64-encoded for binary safety. Path is validated against traversal (`..`, absolute paths, NUL bytes) per SPEC-107. Parent directories are created as needed. STOPPED / IDLE sessions are transparently resumed (ARCH \u00a73.3).",
+        "operationId": "write_file_v1_sessions__session_id__files_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "mode": 420,
+                  "path": "/workspace/notes.txt",
+                  "size": 14
+                },
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Write File V1 Sessions  Session Id  Files Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "File written."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Write a file",
+        "tags": [
+          "Files"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/files/{path}": {
+      "delete": {
+        "description": "Deletes a file under `/workspace`. Directories require `?recursive=true`; deleting `/workspace` itself is rejected (SPEC-107). Missing paths return 404.",
+        "operationId": "delete_file_v1_sessions__session_id__files__path__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required to delete a non-empty directory.",
+            "in": "query",
+            "name": "recursive",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Required to delete a non-empty directory.",
+              "title": "Recursive",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session or file not found (`session_not_found` / `file_not_found`)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete a file or directory",
+        "tags": [
+          "Files"
+        ]
+      },
+      "get": {
+        "description": "Returns the file's raw bytes as `application/octet-stream`. The unix mode is exposed in the `X-File-Mode` response header. Reading a directory returns 400; missing path returns 404.",
+        "operationId": "read_file_v1_sessions__session_id__files__path__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "Raw file bytes.",
+            "headers": {
+              "X-File-Mode": {
+                "description": "Octal file mode (e.g., `0o640`).",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session or file not found (`session_not_found` / `file_not_found`)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read a file",
+        "tags": [
+          "Files"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/resume": {
+      "post": {
+        "description": "Restarts the container for a `STOPPED` or `IDLE` session. Process state from before the stop is gone \u2014 only filesystem state persists (ARCH \u00a73.4).",
+        "operationId": "resume_session_v1_sessions__session_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session is in a state that doesn't allow this operation (`invalid_state`)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume a stopped session",
+        "tags": [
+          "Sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/stop": {
+      "post": {
+        "description": "Stops the underlying container; the volume and `/workspace` contents are retained (SPEC-104). Resume implicitly via `/exec` or any file op, or explicitly via `/resume`.",
+        "operationId": "stop_session_v1_sessions__session_id__stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session is in a state that doesn't allow this operation (`invalid_state`)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Idle-stop a session",
+        "tags": [
+          "Sessions"
+        ]
+      }
+    },
+    "/v1/tenants/me/tokens/rotate": {
+      "post": {
+        "description": "Issues a new bearer token for the calling tenant and marks the current token revoked-at = now + grace seconds. Both tokens authenticate during the grace window so callers can read the response and switch over without downtime. After the window the old token returns 401. SPEC-405.",
+        "operationId": "rotate_token_v1_tenants_me_tokens_rotate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotateTokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rotate the calling tenant's bearer token",
+        "tags": [
+          "Tenants"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "Lifecycle: create, get, stop, resume, destroy.",
+      "name": "Sessions"
+    },
+    {
+      "description": "Run commands inside a session. Sync and Server-Sent-Events streaming.",
+      "name": "Exec"
+    },
+    {
+      "description": "Read, write, list, and delete files under `/workspace`.",
+      "name": "Files"
+    },
+    {
+      "description": "Token rotation and other tenant-scoped admin.",
+      "name": "Tenants"
+    },
+    {
+      "description": "Liveness, readiness, and Prometheus metrics.",
+      "name": "Operations"
+    }
+  ]
+}

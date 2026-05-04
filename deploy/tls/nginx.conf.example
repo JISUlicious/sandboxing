@@ -1,0 +1,60 @@
+# deploy/tls/nginx.conf.example
+#
+# nginx fronting the sandbox API with TLS. Pair with certbot or any
+# other ACME client to manage certs.
+#
+# In /etc/sandbox/env:
+#   SANDBOX_TRUST_PROXY_HEADERS=1
+# so the API trusts the X-Forwarded-* headers nginx sets below.
+
+upstream sandbox_api {
+    server 127.0.0.1:8000;
+    keepalive 16;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name sandbox.example.com;
+
+    # Replace with your cert paths (e.g. from certbot /etc/letsencrypt/live/...).
+    ssl_certificate     /etc/ssl/sandbox/fullchain.pem;
+    ssl_certificate_key /etc/ssl/sandbox/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # SSE streaming endpoint needs longer timeouts and disabled buffering.
+    location /v1/sessions/ {
+        proxy_pass http://sandbox_api;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+    }
+
+    location / {
+        proxy_pass http://sandbox_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+    }
+}
+
+# Optional plain-HTTP redirect to HTTPS.
+server {
+    listen 80;
+    server_name sandbox.example.com;
+    return 308 https://$server_name$request_uri;
+}

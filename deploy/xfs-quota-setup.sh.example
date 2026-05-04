@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# deploy/xfs-quota-setup.sh — robust XFS project quota setup.
+#
+# Allocates a stable project ID for a session and enforces the
+# per-volume size cap (SPEC-302). Designed to fail loudly so the
+# control plane's audit log captures a non-zero exit instead of
+# silently writing a project with no limit.
+#
+# Env vars supplied by the control plane:
+#   SESSION_ID    ULID of the session
+#   TENANT_ID     tenant id (currently always "default")
+#   VOLUME_NAME   docker volume name (sandbox-vol-<session-id>)
+#   VOLUME_PATH   $VOLUME_BASE/$SESSION_ID — directory the volume binds
+#   VOLUME_BASE   XFS-mounted workspace root (/var/lib/sandbox-volumes)
+#   WORKSPACE_MIB size limit in MiB
+#
+# Pre-conditions:
+#   - $VOLUME_BASE is on an XFS filesystem mounted with `prjquota`.
+#   - $VOLUME_PATH already exists (created by docker_client.create_volume).
+#   - The script's user has passwordless sudo for /usr/sbin/xfs_quota
+#     and write access to /etc/projects.
+
+set -euo pipefail
+
+: "${SESSION_ID:?}"
+: "${VOLUME_PATH:?}"
+: "${VOLUME_BASE:?}"
+: "${WORKSPACE_MIB:?}"
+
+# Stable, deterministic project ID derived from the ULID. Hash to a
+# 31-bit positive int (XFS allows uint32, but tooling sometimes treats
+# the value as int).
+PROJECT_ID=$(printf '%s' "$SESSION_ID" | cksum | awk '{print $1 % 2147483647}')
+PROJECTS_FILE=/etc/projects
+
+# Register the project ID -> path mapping in /etc/projects so the
+# userspace `xfs_quota` validates the project on `limit` calls. Without
+# this entry some xfs_quota builds silently no-op the `limit`
+# subcommand even when `project -s` succeeded.
+# Idempotent: drop any stale line for the same ID or path, then
+# append the fresh mapping.
+sudo sed -i \
+    -e "/^${PROJECT_ID}:/d" \
+    -e "\\|:${VOLUME_PATH}\$|d" \
+    "$PROJECTS_FILE" 2>/dev/null \
+    || sudo touch "$PROJECTS_FILE"
+echo "${PROJECT_ID}:${VOLUME_PATH}" | sudo tee -a "$PROJECTS_FILE" >/dev/null
+
+# Apply project ID + limit in a single xfs_quota invocation. Two
+# separate `xfs_quota -c` calls have been observed to lose userspace
+# state between them on loopback-mounted XFS, leaving a project
+# without any limit.
+sudo xfs_quota -x \
+    -c "project -s -p ${VOLUME_PATH} ${PROJECT_ID}" \
+    -c "limit -p bhard=${WORKSPACE_MIB}m ${PROJECT_ID}" \
+    "$VOLUME_BASE"
+
+# Verify the limit actually took effect. `xfs_quota report -p` lines
+# look like:
+#     #1234567    1234     0   1048576    00 [--------]
+# Field 1 is "#<id>", field 4 is the hard limit in 1KB blocks.
+expected_blocks=$((WORKSPACE_MIB * 1024))
+applied_hard=$(
+    sudo xfs_quota -x -c "report -p" "$VOLUME_BASE" \
+    | grep -E "^#${PROJECT_ID}([[:space:]]|\$)" \
+    | awk '{print $4}'
+)
+if [[ -z "${applied_hard:-}" ]] || (( applied_hard < expected_blocks )); then
+    echo "ERROR: project ${PROJECT_ID} hard limit is '${applied_hard:-unset}', " \
+         "expected ${expected_blocks} blocks (= ${WORKSPACE_MIB} MiB)" >&2
+    exit 1
+fi
+
+# Persist the project ID so teardown can find it. Written by the
+# script's user (jisu); the parent dir is 0777 from create_volume.
+echo "$PROJECT_ID" > "$VOLUME_PATH/.project_id"

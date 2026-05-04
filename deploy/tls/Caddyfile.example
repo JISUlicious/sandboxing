@@ -1,0 +1,41 @@
+# deploy/tls/Caddyfile.example
+#
+# Drop-in Caddy config for adopters who want TLS in front of the
+# sandbox API. Caddy auto-provisions Let's Encrypt certs.
+#
+# Usage on the host:
+#   docker run -d --name caddy \
+#       --network host \
+#       -v /etc/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
+#       -v caddy_data:/data \
+#       -v caddy_config:/config \
+#       caddy:2
+#
+# In /etc/sandbox/env on the API host, set:
+#   SANDBOX_TRUST_PROXY_HEADERS=1
+# so the control plane honors X-Forwarded-Proto and X-Forwarded-For.
+
+sandbox.example.com {
+    encode zstd gzip
+
+    # Forward to the loopback-bound control plane.
+    reverse_proxy 127.0.0.1:8000 {
+        # Caddy sets X-Forwarded-{For,Proto,Host} automatically.
+        # Add anything else you want plumbed through:
+        header_up X-Real-IP {remote_host}
+    }
+
+    # Optional: rate limit per IP (requires the rate-limit module).
+    # rate_limit {
+    #     zone per_ip {
+    #         key {remote_host}
+    #         events 60
+    #         window 1m
+    #     }
+    # }
+
+    log {
+        output file /var/log/caddy/sandbox-access.log
+        format json
+    }
+}

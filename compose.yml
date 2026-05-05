@@ -25,7 +25,7 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.30.0.0/24
+        - subnet: ${SANDBOX_SUBNET:-172.30.0.0/24}
     labels:
       sandbox.managed: "true"
 
@@ -34,12 +34,12 @@ services:
   # Squid forward proxy — every sandbox container's only egress hop.
   # ---------------------------------------------------------------
   proxy:
-    image: ghcr.io/jisulicious/sandbox-proxy:${SANDBOX_VERSION:-latest}
+    image: ${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-proxy:${SANDBOX_VERSION:-latest}
     container_name: sandbox-proxy
     restart: unless-stopped
     networks:
       sandbox_egress:
-        ipv4_address: 172.30.0.2
+        ipv4_address: ${PROXY_IP:-172.30.0.2}
     volumes:
       # Operator-managed allowlist. Edit + `docker compose restart proxy`.
       - ./proxy/allowed-domains.txt:/etc/squid/allowed-domains.txt:ro
@@ -59,7 +59,7 @@ services:
     restart: "no"
     entrypoint: ["/bin/sh", "-c"]
     command: |
-      docker pull ghcr.io/jisulicious/sandbox-runtime:${SANDBOX_VERSION:-latest}
+      docker pull ${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-runtime:${SANDBOX_VERSION:-latest}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
@@ -73,7 +73,7 @@ services:
   #   (deploy/sandbox-api.service / slice 9-4). Cap drop ALL + 4
   #   explicit caps keeps the privilege footprint tight.
   control-plane:
-    image: ghcr.io/jisulicious/sandbox-control-plane:${SANDBOX_VERSION:-latest}
+    image: ${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-control-plane:${SANDBOX_VERSION:-latest}
     container_name: sandbox-control-plane
     restart: unless-stopped
     depends_on:
@@ -83,8 +83,8 @@ services:
       - /etc/sandbox/env
     environment:
       SANDBOX_NETWORK_NAME: "sandbox_egress"
-      SANDBOX_EGRESS_PROXY_URL: "http://172.30.0.2:3128"
-      SANDBOX_SANDBOX_IMAGE: "ghcr.io/jisulicious/sandbox-runtime:${SANDBOX_VERSION:-latest}"
+      SANDBOX_EGRESS_PROXY_URL: "http://${PROXY_IP:-172.30.0.2}:${PROXY_PORT:-3128}"
+      SANDBOX_SANDBOX_IMAGE: "${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-runtime:${SANDBOX_VERSION:-latest}"
       SANDBOX_QUOTA_SETUP_CMD: "/opt/sandbox/deploy/xfs-quota-setup-compose.sh"
       SANDBOX_QUOTA_TEARDOWN_CMD: "/opt/sandbox/deploy/xfs-quota-teardown-compose.sh"
       # The workspace mount path on the host. Override via a `.env`

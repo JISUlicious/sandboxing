@@ -44,23 +44,36 @@ UNIT_DST=/etc/systemd/system/sandbox-api.service
 AUDIT_LOG=/var/log/sandbox/audit.log
 DAEMON_JSON=/etc/docker/daemon.json
 
-# `SANDBOX_VOLUME_BASE` is the single source of truth for the per-
-# session workspace mount path. compose.yml reads the same env var.
-# When invoked via `sudo`, the operator's exported value would
-# normally be stripped (secure_path reset), so we pull it from
-# /etc/sandbox/env if present — putting it once in that file keeps
-# this script and `docker compose --env-file /etc/sandbox/env up`
-# in sync.
-if [[ -z "${SANDBOX_VOLUME_BASE:-}" && -r /etc/sandbox/env ]]; then
-    SANDBOX_VOLUME_BASE=$(awk -F= '$1=="SANDBOX_VOLUME_BASE"{print $2; exit}' /etc/sandbox/env || true)
-    [[ -n "${SANDBOX_VOLUME_BASE:-}" ]] && export SANDBOX_VOLUME_BASE
-fi
+# Several knobs are also referenced by compose.yml's variable
+# substitution. When invoked via `sudo`, the operator's exported
+# values would normally be stripped (secure_path reset), so for any
+# unset var we pull it from /etc/sandbox/env. Putting them once in
+# that file keeps this script and `docker compose --env-file
+# /etc/sandbox/env up` in sync.
+read_env() {
+    local var=$1
+    if [[ -z "${!var:-}" && -r /etc/sandbox/env ]]; then
+        local v
+        v=$(awk -F= -v k="$var" '$1==k{print $2; exit}' /etc/sandbox/env || true)
+        if [[ -n "$v" ]]; then
+            printf -v "$var" '%s' "$v"
+            export "$var"
+        fi
+    fi
+}
+read_env SANDBOX_VOLUME_BASE
+read_env SANDBOX_SUBNET
+read_env PROXY_IP
+read_env PROXY_PORT
+read_env SANDBOX_FS_IMG
+read_env SANDBOX_IMAGE_NAMESPACE   # informational; not used here directly
+
 XFS_MOUNT="${SANDBOX_VOLUME_BASE:-/var/lib/sandbox-volumes}"
-# Loopback image lives next to the mount; rename in step with the
-# mount path so a fresh box never collides with a stale image from
-# an earlier test.
-XFS_IMG="${SANDBOX_XFS_IMG:-/var/lib/sandbox-fs.img}"
+# Loopback image lives next to the mount; same default name backup.sh
+# uses so the two scripts target one file.
+XFS_IMG="${SANDBOX_FS_IMG:-/var/lib/sandbox-fs.img}"
 XFS_SIZE_GB="${XFS_SIZE_GB:-50}"   # initial loopback size; override via env
+SUBNET="${SANDBOX_SUBNET:-172.30.0.0/24}"
 
 CHECK_ONLY=0
 FULL=0
@@ -219,16 +232,24 @@ JSON
     echo
 
     # ---- F6. sandbox_egress network ------------------------------
-    echo "F6) sandbox_egress network"
+    echo "F6) sandbox_egress network ($SUBNET)"
     if docker network inspect sandbox_egress >/dev/null 2>&1; then
-        skip "sandbox_egress network already exists"
+        existing_subnet=$(docker network inspect sandbox_egress \
+            -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "?")
+        if [[ "$existing_subnet" == "$SUBNET" ]]; then
+            skip "sandbox_egress network already exists ($SUBNET)"
+        else
+            fail "sandbox_egress network exists with subnet $existing_subnet; want $SUBNET"
+            note "to fix: docker network rm sandbox_egress (after stopping the stack)"
+            exit 1
+        fi
     else
         run docker network create \
             --driver bridge \
-            --subnet 172.30.0.0/24 \
+            --subnet "$SUBNET" \
             --label sandbox.managed=true \
             sandbox_egress
-        ok "sandbox_egress network created (172.30.0.0/24)"
+        ok "sandbox_egress network created ($SUBNET)"
     fi
     echo
 fi

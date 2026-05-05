@@ -14,57 +14,122 @@ workspaces, audit log with fail-closed semantics. See
 - Driving the service from Claude Code / Desktop / Cursor over MCP:
   [docs/MCP.md](./docs/MCP.md).
 
-## Requirements
+## Installation
 
-- Python ≥ 3.11 (the project targets 3.12; managed by [uv](https://github.com/astral-sh/uv)).
-- Docker Desktop (macOS / Windows) or Docker Engine (Linux).
-- For **production**: Linux x86_64 with `runsc` (gVisor) registered as
-  a Docker runtime, daemon `userns-remap=default`, and an
-  XFS-formatted (or ext4 + `prjquota`) volume directory. See SPEC-400
-  and SPEC-302.
+### Prerequisites
 
-## Quick-start (production, Compose path)
+- **uv** — Python ≥3.11 + venv manager. Installs its own Python; no
+  system Python needed.
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+- **Docker** — Docker Desktop on macOS / Windows, or Docker Engine on
+  Linux. The dev path needs only the local daemon; production paths
+  need the full host setup below.
+- **Production hosts** also need Linux x86_64, gVisor (`runsc`)
+  registered as a Docker runtime, daemon `userns-remap=default`, and
+  an XFS (or ext4 + `prjquota`) volume directory (SPEC-400 / SPEC-302
+  / SPEC-401). On Ubuntu/Debian the Compose path's `setup-host.sh
+  --full` automates all of these. On other distros, follow
+  [docs/SETUP.md](./docs/SETUP.md) §1–§5 for the manual steps.
 
-```bash
-git clone https://github.com/JISUlicious/sandboxing
-cd sandboxing
-sudo deploy/setup-host.sh --full --with-xfs-quota
-sudo cp deploy/.env.compose.example /etc/sandbox/env
-sudoedit /etc/sandbox/env                  # set SANDBOX_API_TOKEN + _PEPPER
-sudo docker compose --env-file /etc/sandbox/env up -d
-curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/healthz
-```
+### Path A — Local dev (no Linux host required)
 
-Pulls three published images from `ghcr.io/JISUlicious/sandbox-*`.
-Full walkthrough + trade-offs vs the systemd path:
-[docs/DEPLOY.md](./docs/DEPLOY.md).
-
-## Run locally (dev mode, no Linux host)
+For running the test suite or driving the API end-to-end against
+Docker Desktop:
 
 ```bash
+git clone https://github.com/JISUlicious/sandboxing && cd sandboxing
 uv sync --extra dev
 SANDBOX_DEV_MODE=1 SANDBOX_API_TOKEN=dev-token \
     uv run uvicorn api.server:app --reload
 ```
 
-Then in another shell:
+`SANDBOX_DEV_MODE=1` (SPEC-302) relaxes the production-only checks
+(`runsc` required, XFS quota required) and refuses non-loopback bind.
+
+### Path B — Production via Docker Compose (recommended)
+
+Pulls three published images from `ghcr.io/JISUlicious/sandbox-*`:
 
 ```bash
-curl -H 'Authorization: Bearer dev-token' \
-     -H 'Content-Type: application/json' \
-     -d '{}' \
-     http://127.0.0.1:8000/v1/sessions
+git clone https://github.com/JISUlicious/sandboxing && cd sandboxing
+sudo deploy/setup-host.sh --full --with-xfs-quota
+sudo cp deploy/.env.compose.example /etc/sandbox/env
+sudoedit /etc/sandbox/env                # fill in the two required secrets (next subsection)
+sudo chmod 0640 /etc/sandbox/env
+sudo docker compose --env-file /etc/sandbox/env up -d
 ```
 
-`SANDBOX_DEV_MODE=1` (SPEC-302) relaxes the production-only checks
-(runsc required, XFS quota required) so the service can run on a
-developer Mac via Docker Desktop. Dev mode refuses non-loopback bind.
+`setup-host.sh --full` installs Docker, gVisor, daemon.json
+(`userns-remap`), iptables, the `sandbox_egress` network, and the
+slice-9 security hardening — all idempotent, re-run safe. Full
+walkthrough including upgrades / backup / trade-offs:
+[docs/DEPLOY.md](./docs/DEPLOY.md).
 
-## Build the images
+### Path C — Production via systemd
+
+For deeper customisation (non-apt distros, strict-no-`SYS_ADMIN`-in-
+container posture, custom systemd unit overrides):
 
 ```bash
-docker build -t sandbox-runtime:latest sandbox/   # the per-session container
-docker build -t sandbox-proxy:latest   proxy/     # the Squid egress proxy
+git clone https://github.com/JISUlicious/sandboxing && cd sandboxing
+# Follow docs/SETUP.md §1–§5 for distro-specific prereqs, then:
+sudo deploy/setup-host.sh                # security hardening only (no --full)
+sudo systemctl enable --now sandbox-api
+```
+
+[docs/SETUP.md](./docs/SETUP.md) is the reference walkthrough.
+
+### Configuration (environment variables)
+
+The control plane reads its config from environment variables (env
+prefix `SANDBOX_`). On the Compose path these live in
+`/etc/sandbox/env`; the systemd path uses the same file plus
+`/etc/sandbox/{backup,iptables}.env` for tool-specific overrides.
+
+**Required** — service will not start without these:
+
+| Variable | Purpose | Generate |
+|---|---|---|
+| `SANDBOX_API_TOKEN` | Bearer token for the bootstrap `default` tenant. | `openssl rand -hex 32` |
+| `SANDBOX_TOKEN_PEPPER` | HMAC pepper for hashed tenant tokens (SPEC-405). Set **once**; rotating invalidates every token. Back up `/etc/sandbox/env` after first set. | `openssl rand -hex 32` |
+
+**Commonly overridden** — defaults usually work:
+
+| Variable | Default | When to override |
+|---|---|---|
+| `SANDBOX_VERSION` | `latest` | Pin a release tag for production so an upstream `:latest` republish doesn't move under you. |
+| `SANDBOX_BIND_VOLUME_UID` | (auto-filled by `setup-host.sh` from `/etc/subuid`) | Set manually if `setup-host.sh` couldn't detect dockremap; computed as `dockremap` subuid start + 10000. SPEC-401 production hardening pivot. |
+| `SANDBOX_VOLUME_BASE` | `/var/lib/sandbox-volumes` | Relocate workspace bind mounts onto a dedicated big disk. Must be picked **before** the first session — see [DEPLOY.md "Customize the workspace volume path"](./docs/DEPLOY.md). |
+| `SANDBOX_IMAGE_NAMESPACE` | `ghcr.io/jisulicious` | Forks publishing to their own ghcr.io path. |
+| `SANDBOX_TRUST_PROXY_HEADERS` | unset | Enable when behind a TLS-terminating reverse proxy (Caddy / nginx — sample configs in `deploy/tls/`). |
+
+The full annotated list of every knob is in
+[`deploy/.env.compose.example`](./deploy/.env.compose.example).
+
+### Building images from source
+
+For forks, air-gapped deploys, or local development of the runtime
+images:
+
+```bash
+docker build -t sandbox-runtime:latest sandbox/                            # per-session container
+docker build -t sandbox-proxy:latest   proxy/                              # Squid egress proxy
+docker build -f Dockerfile.control-plane -t sandbox-control-plane:latest . # FastAPI control plane
+```
+
+Tag them under your own namespace (or `ghcr.io/jisulicious/...` if
+you want to override the upstream `:latest`) before `docker compose
+up -d` picks them up.
+
+### Verify
+
+```bash
+# On the host (or via SSH tunnel if remote).
+TOKEN=$(sudo grep API_TOKEN /etc/sandbox/env | cut -d= -f2)   # or your dev token
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/healthz
+# {"status":"ok"}
 ```
 
 ## Tests

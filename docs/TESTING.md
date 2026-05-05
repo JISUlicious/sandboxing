@@ -354,9 +354,8 @@ reaper will hard-destroy them automatically at the 24 h TTL.
 ## What this guide does **not** cover
 
 - Production posture (gVisor actually intercepting, hardening flags
-  applied) — see `SETUP.md` Validation section.
-- Adversarial isolation (host escape attempts, syscall fuzzing) — slice
-  5+ work; not in scope today.
+  applied, egress allowlist actually blocking, sandbox-to-sandbox
+  iptables drop, XFS quota cap actually firing) — see `SETUP.md`
+  "Validation" section.
+- Adversarial isolation (host escape attempts, syscall fuzzing).
 - Load testing.
-- Egress isolation — slice 5; until then containers reach the network
-  freely.

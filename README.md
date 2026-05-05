@@ -10,7 +10,9 @@ workspaces, audit log with fail-closed semantics. See
 
 For the install / validation walkthroughs, see
 [docs/SETUP.md](./docs/SETUP.md) and
-[docs/TESTING.md](./docs/TESTING.md).
+[docs/TESTING.md](./docs/TESTING.md). For driving the service from
+Claude Code / Desktop / Cursor over MCP, see
+[docs/MCP.md](./docs/MCP.md).
 
 ## Requirements
 
@@ -55,7 +57,7 @@ docker build -t sandbox-proxy:latest   proxy/     # the Squid egress proxy
 uv run pytest
 ```
 
-88 unit tests mock the Docker client and run without a daemon. For
+90 unit tests mock the Docker client and run without a daemon. For
 end-to-end testing against a deployed Linux host, see
 [docs/TESTING.md](./docs/TESTING.md) and the helper scripts:
 
@@ -82,6 +84,10 @@ Two real-Docker integration tests are gated by
   `DELETE /v1/sessions/{id}/files/{path}?recursive=...` (delete)
 - **Operations** — `GET /healthz`, `GET /readyz` (reports
   `{docker, audit}`), `GET /metrics` (Prometheus exposition)
+- **MCP** — `POST /mcp` (Streamable HTTP, bearer-auth) exposes the
+  same surface as 10 Model Context Protocol tools so Claude Code /
+  Desktop / Cursor can drive sandboxes directly. See
+  [docs/MCP.md](./docs/MCP.md).
 
 OpenAPI / Swagger UI at `/docs`, ReDoc at `/redoc`, machine-readable
 schema at `/openapi.json`.
@@ -93,10 +99,13 @@ api/         control-plane source (FastAPI, registry, docker driver,
              exec, files, audit, reaper, metrics)
 sandbox/     Dockerfile for sandbox-runtime
 proxy/       Dockerfile + squid.conf + allowed-domains.txt for sandbox-proxy
-deploy/      iptables-setup.sh, systemd units, xfs-quota-{setup,teardown}.sh.example
+deploy/      iptables-setup.sh, systemd units (sandbox-api,
+             sandbox-iptables, sandbox-backup, sandbox.logrotate),
+             setup-host.sh, sandbox-quota-helper.sh, xfs-quota-
+             {setup,teardown}.sh.example
 tools/       smoke-remote.sh (e2e smoke), validate-slices.sh (slice
              6/7/8 validation), dump_openapi.py (schema artifact),
              sandbox_tenants.py (tenant + token CLI)
 docs/        SETUP.md (install) and TESTING.md (e2e walkthrough)
-tests/       69 unit tests, all mocked at the DockerClient boundary
+tests/       90 unit tests, all mocked at the DockerClient boundary
 ```

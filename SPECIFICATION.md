@@ -208,7 +208,11 @@ identifies a tenant.
   unprivileged subuid on the host (see
   [ARCH-021](./ARCHITECTURE.md#23-docker-driver)). Seccomp filtering
   is performed by `runsc`; the Docker-level seccomp profile is set to
-  `unconfined` to avoid layering an irrelevant filter on top.
+  `unconfined` to avoid layering an irrelevant filter on top. In
+  bind-mount volume mode the operator MUST set `bind_volume_uid` to
+  the dockremap-mapped UID (= `dockremap` subuid start + 10000), so
+  per-session workspace directories are chown'd to that UID with
+  mode `0700` rather than the world-writable `0777` fallback.
 - **SPEC-402** Containers MUST attach to the dedicated `sandbox_egress`
   bridge network only. Sandbox-to-sandbox traffic on this bridge is
   denied by host iptables; sandbox-to-proxy traffic on TCP/3128 is the

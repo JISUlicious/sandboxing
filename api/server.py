@@ -26,6 +26,8 @@ from api.docker_client import DockerClient
 from api.errors import Unauthorized
 from api.exec import ExecService
 from api.files import FileService
+from api.mcp_server import attach_to_fastapi as mcp_attach
+from api.mcp_server import build_mcp, mcp_lifespan_context
 from api.models import (
     CreateSessionRequest,
     ErrorResponse,
@@ -171,6 +173,11 @@ def create_app(
         audit=service_.audit,
     )
     authn_ = TokenAuthenticator(settings=settings_, registry=service_.registry)
+    mcp_ = build_mcp(
+        sessions=service_,
+        exec_service=exec_service_,
+        file_service=file_service_,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -213,11 +220,14 @@ def create_app(
         if start_reaper:
             await reaper_.start()
             await sampler_.start()
-        try:
-            yield
-        finally:
-            await sampler_.stop()
-            await reaper_.stop()
+        # Compose the FastMCP session manager into our lifespan so the
+        # mounted /mcp endpoint is live for the duration of the app.
+        async with mcp_lifespan_context(mcp_):
+            try:
+                yield
+            finally:
+                await sampler_.stop()
+                await reaper_.stop()
 
     app = FastAPI(
         title="Sandbox Service",
@@ -230,6 +240,7 @@ def create_app(
     app.state.settings = settings_
     app.state.reaper = reaper_
     app.state.sampler = sampler_
+    app.state.mcp = mcp_
 
     # Slice 8e: TLS-readiness — when running behind a reverse proxy
     # that terminates TLS (Caddy / nginx in deploy/tls/*.example),
@@ -639,6 +650,12 @@ def create_app(
             old_token_grace_seconds=grace,
             tenant_id=tenant_id,
         )
+
+    # MCP Streamable HTTP endpoint at /mcp. Mounted LAST so all
+    # explicit FastAPI routes above (incl. /healthz, /readyz,
+    # /metrics, /v1/...) are matched before the catch-all mount.
+    # Bearer auth is bridged via Starlette middleware on the sub-app.
+    mcp_attach(fastapi_app=app, mcp=mcp_, authn=authn_)
 
     return app
 

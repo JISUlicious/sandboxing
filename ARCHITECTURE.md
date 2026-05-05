@@ -204,12 +204,16 @@ labels               = {"sandbox.session_id": session_id,
   - **Production (bind mode):** the driver creates the Docker volume
     with `driver=local`, `type=none`, `o=bind`,
     `device=$quota_volume_base/<session_id>`, so the volume is a bind
-    mount onto a directory on an XFS-prjquota mount. The control plane
-    pre-creates the directory (`mkdir + chmod 0777` so container UID
-    10001 can write through), then runs the operator-provided
-    `quota_setup_cmd` to assign a project ID and `bhard` limit. This
-    is what makes SPEC-302's quota actually fire — Docker's default
-    volume location is usually on a non-prjquota filesystem.
+    mount onto a directory on an XFS-prjquota mount. The control
+    plane pre-creates the directory and, when `bind_volume_uid` is
+    set (operator-installed value derived from `/etc/subuid` for
+    `dockremap`), `os.chown`s it to that UID + chmod 0700. Without
+    that setting it falls back to mode 0777 and logs a startup
+    warning — production posture requires the chowned form. After
+    the directory is in place, the operator-provided `quota_setup_cmd`
+    runs to assign a project ID and `bhard` limit. This is what makes
+    SPEC-302's quota actually fire — Docker's default volume location
+    is usually on a non-prjquota filesystem.
   - **Dev mode** (`quota_volume_base` unset): the driver uses the
     default local volume layout under `/var/lib/docker/volumes`.
     No FS-level quota — local iteration only.

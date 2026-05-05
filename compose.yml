@@ -87,7 +87,11 @@ services:
       SANDBOX_SANDBOX_IMAGE: "ghcr.io/jisulicious/sandbox-runtime:${SANDBOX_VERSION:-latest}"
       SANDBOX_QUOTA_SETUP_CMD: "/opt/sandbox/deploy/xfs-quota-setup-compose.sh"
       SANDBOX_QUOTA_TEARDOWN_CMD: "/opt/sandbox/deploy/xfs-quota-teardown-compose.sh"
-      SANDBOX_QUOTA_VOLUME_BASE: "/var/lib/sandbox-volumes"
+      # The workspace mount path on the host. Override via a `.env`
+      # file next to compose.yml or by exporting before `up`. Must
+      # match the value used by `setup-host.sh` (same env var).
+      # Pick once per host BEFORE the first session — see DEPLOY.md.
+      SANDBOX_QUOTA_VOLUME_BASE: "${SANDBOX_VOLUME_BASE:-/var/lib/sandbox-volumes}"
     ports:
       # SPEC-302: bind to host loopback only. Reverse-proxy in front
       # of this for remote / TLS-terminated access.
@@ -96,7 +100,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /var/lib/sandbox:/var/lib/sandbox
       - /var/log/sandbox:/var/log/sandbox
-      - /var/lib/sandbox-volumes:/var/lib/sandbox-volumes
+      - ${SANDBOX_VOLUME_BASE:-/var/lib/sandbox-volumes}:${SANDBOX_VOLUME_BASE:-/var/lib/sandbox-volumes}
       # /etc/projects is the project-id ↔ path registry xfs_quota
       # uses; helper appends to it, so :rw not :ro.
       - /etc/projects:/etc/projects

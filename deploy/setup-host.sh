@@ -43,8 +43,23 @@ UNIT_SRC="$SCRIPT_DIR/sandbox-api.service"
 UNIT_DST=/etc/systemd/system/sandbox-api.service
 AUDIT_LOG=/var/log/sandbox/audit.log
 DAEMON_JSON=/etc/docker/daemon.json
-XFS_IMG=/var/lib/sandbox-fs.img
-XFS_MOUNT=/var/lib/sandbox-volumes
+
+# `SANDBOX_VOLUME_BASE` is the single source of truth for the per-
+# session workspace mount path. compose.yml reads the same env var.
+# When invoked via `sudo`, the operator's exported value would
+# normally be stripped (secure_path reset), so we pull it from
+# /etc/sandbox/env if present — putting it once in that file keeps
+# this script and `docker compose --env-file /etc/sandbox/env up`
+# in sync.
+if [[ -z "${SANDBOX_VOLUME_BASE:-}" && -r /etc/sandbox/env ]]; then
+    SANDBOX_VOLUME_BASE=$(awk -F= '$1=="SANDBOX_VOLUME_BASE"{print $2; exit}' /etc/sandbox/env || true)
+    [[ -n "${SANDBOX_VOLUME_BASE:-}" ]] && export SANDBOX_VOLUME_BASE
+fi
+XFS_MOUNT="${SANDBOX_VOLUME_BASE:-/var/lib/sandbox-volumes}"
+# Loopback image lives next to the mount; rename in step with the
+# mount path so a fresh box never collides with a stale image from
+# an earlier test.
+XFS_IMG="${SANDBOX_XFS_IMG:-/var/lib/sandbox-fs.img}"
 XFS_SIZE_GB="${XFS_SIZE_GB:-50}"   # initial loopback size; override via env
 
 CHECK_ONLY=0

@@ -42,8 +42,11 @@ sudoedit /etc/sandbox/env                    # SANDBOX_API_TOKEN + _PEPPER
 sudo chown root:root /etc/sandbox/env
 sudo chmod 0640 /etc/sandbox/env
 
-# 3. Up.
-docker compose up -d
+# 3. Up. The --env-file gives compose access to the same file for
+#    BOTH variable substitution (image tags, bind paths) and the
+#    container's runtime env. See "Customize the workspace volume
+#    path" below for why this matters.
+sudo docker compose --env-file /etc/sandbox/env up -d
 
 # 4. Smoke check.
 TOKEN=$(sudo grep API_TOKEN /etc/sandbox/env | cut -d= -f2)
@@ -98,6 +101,64 @@ the systemd path.
 
 ## Operations
 
+### Customize the workspace volume path
+
+By default, per-session workspaces live under
+`/var/lib/sandbox-volumes` on the host. To put them somewhere else
+(e.g., a dedicated big disk you pre-mounted at
+`/data/sandbox-volumes`):
+
+```bash
+# 1. Set the variable in /etc/sandbox/env BEFORE running setup-host.sh.
+echo 'SANDBOX_VOLUME_BASE=/data/sandbox-volumes' | sudo tee -a /etc/sandbox/env
+
+# 2. setup-host.sh reads /etc/sandbox/env automatically; compose
+#    picks up the same value via --env-file. Single source of truth.
+sudo deploy/setup-host.sh --full --with-xfs-quota
+sudo docker compose --env-file /etc/sandbox/env up -d
+```
+
+Three places used to need to agree: compose's host-side bind mount,
+the control plane's `SANDBOX_QUOTA_VOLUME_BASE`, and `setup-host.sh`'s
+XFS mount target. They now all derive from `SANDBOX_VOLUME_BASE`,
+with the legacy default preserved when unset.
+
+**Pick the path BEFORE the first session.** Docker volumes bake the
+absolute bind path into their metadata at create time. Changing
+`SANDBOX_VOLUME_BASE` after sessions exist orphans them — their
+docker volumes still reference the old path, so resume / exec on
+those sessions fails. If you must change it on a running host:
+
+```bash
+# 1. Stop the stack but leave volumes intact.
+sudo docker compose --env-file /etc/sandbox/env stop
+
+# 2. Drain. Either destroy old sessions via the API, or move the data:
+sudo systemctl stop sandbox-backup.timer
+sudo rsync -aHAX /var/lib/sandbox-volumes/ /data/sandbox-volumes/
+sudo umount /var/lib/sandbox-volumes
+sudo sed -i 's|/var/lib/sandbox-volumes|/data/sandbox-volumes|' /etc/fstab
+
+# 3. Recreate the docker volumes pointing at the new path. The
+#    control plane recreates volumes on session create, so the
+#    cleanest path is to drop old metadata for sessions you want to
+#    keep, let the control plane recreate them on next /exec:
+sudo sqlite3 /var/lib/sandbox/sandbox.db \
+    "UPDATE sessions SET status='STOPPED' WHERE status NOT IN ('DESTROYED', 'STOPPED');"
+docker volume ls -q --filter 'name=sandbox-vol-' | xargs -r docker volume rm
+
+# 4. Update env, restart.
+sudo sed -i 's|^SANDBOX_VOLUME_BASE=.*|SANDBOX_VOLUME_BASE=/data/sandbox-volumes|' /etc/sandbox/env
+sudo docker compose --env-file /etc/sandbox/env up -d
+```
+
+The migration is doable but lossy for in-flight sessions. The
+ARCH-051 reconciliation marks them `STOPPED`; the next exec on each
+spins up a fresh container that mounts the **new** path's empty
+workspace dir. If you need the old workspace contents, copy them
+into the new dir at `<new-base>/<session-id>/_data/` before the
+control plane creates the replacement volume.
+
 ### Upgrades
 
 Releases publish new images at `ghcr.io/JISUlicious/sandbox-{...}:<tag>`
@@ -106,8 +167,8 @@ production:
 
 ```bash
 sudo sed -i 's/^SANDBOX_VERSION=.*/SANDBOX_VERSION=v0.1.0/' /etc/sandbox/env
-docker compose pull
-docker compose up -d
+sudo docker compose --env-file /etc/sandbox/env pull
+sudo docker compose --env-file /etc/sandbox/env up -d
 ```
 
 In-flight sessions keep their old `sandbox-runtime` image until the
@@ -117,8 +178,8 @@ created *after* the upgrade use the new runtime.
 ### Logs / metrics
 
 ```bash
-docker compose logs -f control-plane          # FastAPI / sampler / reaper
-docker compose logs -f proxy                  # Squid access log
+sudo docker compose --env-file /etc/sandbox/env logs -f control-plane
+sudo docker compose --env-file /etc/sandbox/env logs -f proxy
 sudo lsattr /var/log/sandbox/audit.log        # confirm `+a`
 curl -s http://127.0.0.1:8000/metrics | head  # Prometheus exposition
 ```
@@ -137,10 +198,10 @@ control-plane`. The reaper / sampler restart with the lifespan.
 ### Tear down
 
 ```bash
-docker compose down                                      # stops + removes containers
+sudo docker compose --env-file /etc/sandbox/env down       # stops + removes containers
 sudo systemctl disable --now sandbox-iptables 2>/dev/null  # if the systemd unit is active
 docker network rm sandbox_egress
-sudo rm -rf /var/log/sandbox /var/lib/sandbox            # destructive; back up first
+sudo rm -rf /var/log/sandbox /var/lib/sandbox              # destructive; back up first
 sudo umount /var/lib/sandbox-volumes && sudo rm /var/lib/sandbox-fs.img
 sudo sed -i '/sandbox-fs.img/d' /etc/fstab
 ```

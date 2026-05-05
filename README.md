@@ -31,7 +31,7 @@ cd sandboxing
 sudo deploy/setup-host.sh --full --with-xfs-quota
 sudo cp deploy/.env.compose.example /etc/sandbox/env
 sudoedit /etc/sandbox/env                  # set SANDBOX_API_TOKEN + _PEPPER
-docker compose up -d
+sudo docker compose --env-file /etc/sandbox/env up -d
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/healthz
 ```
 

@@ -10,7 +10,9 @@ workspaces, audit log with fail-closed semantics. See
 
 For the install / validation walkthroughs, see
 [docs/SETUP.md](./docs/SETUP.md) and
-[docs/TESTING.md](./docs/TESTING.md).
+[docs/TESTING.md](./docs/TESTING.md). For driving the service from
+Claude Code / Desktop / Cursor over MCP, see
+[docs/MCP.md](./docs/MCP.md).
 
 ## Requirements
 
@@ -82,6 +84,10 @@ Two real-Docker integration tests are gated by
   `DELETE /v1/sessions/{id}/files/{path}?recursive=...` (delete)
 - **Operations** — `GET /healthz`, `GET /readyz` (reports
   `{docker, audit}`), `GET /metrics` (Prometheus exposition)
+- **MCP** — `POST /mcp` (Streamable HTTP, bearer-auth) exposes the
+  same surface as 10 Model Context Protocol tools so Claude Code /
+  Desktop / Cursor can drive sandboxes directly. See
+  [docs/MCP.md](./docs/MCP.md).
 
 OpenAPI / Swagger UI at `/docs`, ReDoc at `/redoc`, machine-readable
 schema at `/openapi.json`.

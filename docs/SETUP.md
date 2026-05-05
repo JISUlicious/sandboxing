@@ -5,6 +5,9 @@ isolation, ~10 min) and **Production** (SPEC-400 / SPEC-302 / SPEC-401
 hardening, ~30 min plus slice-5 work). VM-specific differences are
 flagged inline.
 
+> Once the service is up, see [`MCP.md`](./MCP.md) for connecting
+> Claude Code / Desktop / Cursor to the `/mcp` endpoint.
+
 ## Prerequisites
 
 - Linux x86_64. (`runsc` does not ship arm64 binaries; on Apple Silicon,

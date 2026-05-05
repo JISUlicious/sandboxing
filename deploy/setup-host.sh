@@ -1,23 +1,33 @@
 #!/usr/bin/env bash
-# deploy/setup-host.sh — apply slice-9 security hardening on a host
-# that has already followed the Docker / gVisor / iptables steps in
-# docs/SETUP.md.
+# deploy/setup-host.sh — bootstrap a sandbox-service host.
+#
+# Default mode applies the security hardening (slice 9). `--full`
+# also installs the prereqs (Docker + gVisor + daemon.json
+# userns-remap + iptables + sandbox_egress network) so a fresh
+# Ubuntu/Debian box is ready for `docker compose up -d`.
 #
 # Idempotent: re-running is safe. Each step prints OK / SKIP / FAIL.
 #
-# What it does, in order:
-#   1. Compute SANDBOX_BIND_VOLUME_UID from /etc/subuid (dockremap +
-#      10000) and persist it in /etc/sandbox/env.
-#   2. Install /usr/local/bin/sandbox-quota-helper + a locked-down
-#      sudoers entry. Removes the old wildcard sudoers rule if found.
-#   3. Install /etc/logrotate.d/sandbox and `chattr +a` the audit log.
-#   4. Enforce mode 0640 root:sandbox on /etc/sandbox/env.
-#   5. Install (or replace) the hardened sandbox-api.service unit and
-#      reload systemd.
+# Sections (security):
+#   1. SANDBOX_BIND_VOLUME_UID computed from /etc/subuid → env file.
+#   2. /usr/local/bin/sandbox-quota-helper + locked-down sudoers.
+#   3. /etc/logrotate.d/sandbox + `chattr +a` on the audit log.
+#   4. Enforce 0640 root:sandbox on /etc/sandbox/env.
+#   5. Install + daemon-reload the hardened sandbox-api.service.
+#
+# Sections (--full only, run BEFORE the security ones):
+#   F1. apt: docker.io + docker-compose-plugin.
+#   F2. apt: runsc (gVisor).
+#   F3. /etc/docker/daemon.json: register runsc + userns-remap=default.
+#   F4. (Optional --with-xfs-quota) loopback XFS at /var/lib/sandbox-volumes.
+#   F5. iptables-setup.sh.
+#   F6. Pre-create the sandbox_egress network.
 #
 # Usage:
-#   sudo deploy/setup-host.sh            # apply all steps
-#   sudo deploy/setup-host.sh --check    # report state, change nothing
+#   sudo deploy/setup-host.sh                       # security only
+#   sudo deploy/setup-host.sh --full                # prereqs + security
+#   sudo deploy/setup-host.sh --full --with-xfs-quota
+#   sudo deploy/setup-host.sh --check               # dry-run, no changes
 
 set -euo pipefail
 
@@ -32,9 +42,54 @@ LOGROTATE_SRC="$SCRIPT_DIR/sandbox.logrotate"
 UNIT_SRC="$SCRIPT_DIR/sandbox-api.service"
 UNIT_DST=/etc/systemd/system/sandbox-api.service
 AUDIT_LOG=/var/log/sandbox/audit.log
+DAEMON_JSON=/etc/docker/daemon.json
+
+# Several knobs are also referenced by compose.yml's variable
+# substitution. When invoked via `sudo`, the operator's exported
+# values would normally be stripped (secure_path reset), so for any
+# unset var we pull it from /etc/sandbox/env. Putting them once in
+# that file keeps this script and `docker compose --env-file
+# /etc/sandbox/env up` in sync.
+read_env() {
+    local var=$1
+    if [[ -z "${!var:-}" && -r /etc/sandbox/env ]]; then
+        local v
+        v=$(awk -F= -v k="$var" '$1==k{print $2; exit}' /etc/sandbox/env || true)
+        if [[ -n "$v" ]]; then
+            printf -v "$var" '%s' "$v"
+            export "$var"
+        fi
+    fi
+}
+read_env SANDBOX_VOLUME_BASE
+read_env SANDBOX_SUBNET
+read_env PROXY_IP
+read_env PROXY_PORT
+read_env SANDBOX_FS_IMG
+read_env SANDBOX_IMAGE_NAMESPACE   # informational; not used here directly
+
+XFS_MOUNT="${SANDBOX_VOLUME_BASE:-/var/lib/sandbox-volumes}"
+# Loopback image lives next to the mount; same default name backup.sh
+# uses so the two scripts target one file.
+XFS_IMG="${SANDBOX_FS_IMG:-/var/lib/sandbox-fs.img}"
+XFS_SIZE_GB="${XFS_SIZE_GB:-50}"   # initial loopback size; override via env
+SUBNET="${SANDBOX_SUBNET:-172.30.0.0/24}"
 
 CHECK_ONLY=0
-[[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
+FULL=0
+WITH_XFS=0
+for arg in "$@"; do
+    case "$arg" in
+        --check)          CHECK_ONLY=1 ;;
+        --full)           FULL=1 ;;
+        --with-xfs-quota) WITH_XFS=1 ;;
+        -h|--help)
+            sed -n '2,/^$/p' "$0" | head -n 35 | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *) echo "unknown flag: $arg" >&2; exit 2 ;;
+    esac
+done
 
 if [[ $EUID -ne 0 ]]; then
     echo "ERROR: must run as root (sudo $0)" >&2
@@ -53,6 +108,151 @@ run() {
         "$@"
     fi
 }
+
+# ---------------------------------------------------------------------
+# --full prereq sections (F1–F6). Skipped unless --full was passed.
+# Apt-only; Rocky/RHEL users follow docs/SETUP.md for the manual path.
+# ---------------------------------------------------------------------
+if (( FULL )); then
+    if ! command -v apt-get >/dev/null 2>&1; then
+        fail "--full only supports apt-based distros. Follow docs/SETUP.md manually on Rocky/RHEL."
+        exit 1
+    fi
+
+    # ---- F1. Docker Engine + compose plugin -----------------------
+    echo "F1) Docker Engine + compose plugin"
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        skip "docker + compose already installed ($(docker --version | cut -d, -f1))"
+    else
+        run apt-get update -qq
+        run apt-get install -y --no-install-recommends \
+            ca-certificates curl docker.io docker-compose-plugin
+        run systemctl enable --now docker
+        ok "Docker Engine installed + enabled"
+    fi
+    echo
+
+    # ---- F2. gVisor (runsc) --------------------------------------
+    echo "F2) gVisor (runsc)"
+    if command -v runsc >/dev/null 2>&1; then
+        skip "runsc already installed ($(runsc --version 2>&1 | head -n1))"
+    else
+        run install -d -m 0755 /etc/apt/keyrings
+        # Use the canonical gVisor key + repo (per docs/SETUP.md §2).
+        if (( ! CHECK_ONLY )); then
+            curl -fsSL https://gvisor.dev/archive.key \
+                | gpg --dearmor -o /etc/apt/keyrings/gvisor-archive-keyring.gpg
+            arch=$(dpkg --print-architecture)
+            echo "deb [arch=$arch signed-by=/etc/apt/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+                > /etc/apt/sources.list.d/gvisor.list
+        else
+            note "would install gvisor key + repo"
+        fi
+        run apt-get update -qq
+        run apt-get install -y --no-install-recommends runsc
+        ok "runsc installed"
+    fi
+    echo
+
+    # ---- F3. /etc/docker/daemon.json -----------------------------
+    echo "F3) /etc/docker/daemon.json (runsc + userns-remap)"
+    if [[ -f $DAEMON_JSON ]] \
+       && grep -q '"runsc"' "$DAEMON_JSON" 2>/dev/null \
+       && grep -q '"userns-remap"' "$DAEMON_JSON" 2>/dev/null; then
+        skip "$DAEMON_JSON already has runsc + userns-remap"
+    else
+        if (( CHECK_ONLY )); then
+            note "would write $DAEMON_JSON with runsc + userns-remap=default"
+        else
+            install -d -m 0755 /etc/docker
+            cat > "$DAEMON_JSON" <<'JSON'
+{
+  "runtimes": {
+    "runsc": { "path": "/usr/bin/runsc" },
+    "runsc-kvm": {
+      "path": "/usr/bin/runsc",
+      "runtimeArgs": ["--platform=kvm"]
+    }
+  },
+  "userns-remap": "default"
+}
+JSON
+            systemctl restart docker
+        fi
+        ok "$DAEMON_JSON written; docker restarted"
+    fi
+    # Ensure /etc/projects exists so compose's :rw bind has a target.
+    if [[ ! -f /etc/projects ]]; then
+        run touch /etc/projects
+        run chmod 0644 /etc/projects
+        ok "/etc/projects created (XFS prjquota registry)"
+    fi
+    echo
+
+    # ---- F4. Loopback XFS volume area (optional) -----------------
+    if (( WITH_XFS )); then
+        echo "F4) Loopback XFS at $XFS_MOUNT (--with-xfs-quota)"
+        if mountpoint -q "$XFS_MOUNT"; then
+            skip "$XFS_MOUNT already mounted"
+        else
+            run install -d -m 0755 "$XFS_MOUNT"
+            if [[ ! -f $XFS_IMG ]]; then
+                run truncate -s "${XFS_SIZE_GB}G" "$XFS_IMG"
+                run mkfs.xfs -q "$XFS_IMG"
+                ok "created $XFS_IMG ($XFS_SIZE_GB GiB)"
+            fi
+            # Persist the mount via /etc/fstab so reboots restore it.
+            if ! grep -q "$XFS_IMG" /etc/fstab 2>/dev/null; then
+                if (( CHECK_ONLY )); then
+                    note "would append fstab entry for $XFS_IMG"
+                else
+                    printf '%s %s xfs loop,prjquota,defaults 0 2\n' \
+                        "$XFS_IMG" "$XFS_MOUNT" >> /etc/fstab
+                fi
+            fi
+            run mount "$XFS_MOUNT"
+            ok "mounted $XFS_IMG on $XFS_MOUNT"
+        fi
+        echo
+    fi
+
+    # ---- F5. iptables (DOCKER-USER chain rules) ------------------
+    echo "F5) iptables (DOCKER-USER)"
+    if iptables -L DOCKER-USER -n 2>/dev/null | grep -q sandbox; then
+        skip "DOCKER-USER chain already has sandbox rules"
+    else
+        if [[ -x "$SCRIPT_DIR/iptables-setup.sh" ]]; then
+            run "$SCRIPT_DIR/iptables-setup.sh"
+            ok "iptables rules applied"
+        else
+            fail "$SCRIPT_DIR/iptables-setup.sh not found / not executable"
+            exit 1
+        fi
+    fi
+    echo
+
+    # ---- F6. sandbox_egress network ------------------------------
+    echo "F6) sandbox_egress network ($SUBNET)"
+    if docker network inspect sandbox_egress >/dev/null 2>&1; then
+        existing_subnet=$(docker network inspect sandbox_egress \
+            -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "?")
+        if [[ "$existing_subnet" == "$SUBNET" ]]; then
+            skip "sandbox_egress network already exists ($SUBNET)"
+        else
+            fail "sandbox_egress network exists with subnet $existing_subnet; want $SUBNET"
+            note "to fix: docker network rm sandbox_egress (after stopping the stack)"
+            exit 1
+        fi
+    else
+        run docker network create \
+            --driver bridge \
+            --subnet "$SUBNET" \
+            --label sandbox.managed=true \
+            sandbox_egress
+        ok "sandbox_egress network created ($SUBNET)"
+    fi
+    echo
+fi
 
 # ---------------------------------------------------------------------
 # 1. Compute SANDBOX_BIND_VOLUME_UID from /etc/subuid (dockremap line).
@@ -216,5 +416,18 @@ echo
 if (( CHECK_ONLY )); then
     echo "(check mode — no changes applied)"
 else
-    echo "Done. Next: sudo systemctl restart sandbox-api"
+    echo "Done."
+    if (( FULL )); then
+        cat <<'NEXT'
+
+Next steps:
+  sudo cp deploy/.env.compose.example /etc/sandbox/env
+  sudoedit /etc/sandbox/env             # set SANDBOX_API_TOKEN + _PEPPER
+  sudo chmod 0640 /etc/sandbox/env
+  docker compose up -d
+  curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/healthz
+NEXT
+    else
+        echo "Next: sudo systemctl restart sandbox-api"
+    fi
 fi

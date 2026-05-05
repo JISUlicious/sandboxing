@@ -1,0 +1,75 @@
+# Sandbox control-plane image — see docs/DEPLOY.md.
+#
+# Two-stage build:
+#   builder  -> resolve + install deps into /app/.venv via uv
+#   runtime  -> slim runtime image with xfsprogs + the privileged
+#               quota helper, ready to run uvicorn.
+#
+# The control-plane container is intentionally NOT user-namespace
+# remapped (compose.yml sets `userns_mode: host`) so the in-container
+# `xfs_quota` syscalls succeed against the host filesystem. See the
+# decisions table in docs/DEPLOY.md.
+
+# ---------- builder ----------
+FROM python:3.12-slim AS builder
+
+ENV UV_LINK_MODE=copy \
+    UV_NO_PROGRESS=1 \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+
+# uv ships a static binary; pin to a recent stable release.
+COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /uvx /usr/local/bin/
+
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+COPY api/ ./api/
+
+# `--no-dev` excludes pytest/ruff; `--frozen` enforces uv.lock.
+RUN uv sync --frozen --no-dev --no-editable
+
+# ---------- runtime ----------
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/app/.venv/bin:$PATH
+
+# xfsprogs supplies xfs_quota for the in-container quota path.
+# tini reaps zombie processes from `docker exec` invocations.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        xfsprogs \
+        tini \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /app/.venv /app/.venv
+COPY api/ ./api/
+
+# Privileged helper + Compose-specific wrappers. The helper is the
+# same script the systemd path uses; the wrappers exec it without
+# sudo because the control-plane container runs as host root
+# (userns_mode: host).
+COPY deploy/sandbox-quota-helper.sh             /usr/local/bin/sandbox-quota-helper
+COPY deploy/xfs-quota-setup-compose.sh          /opt/sandbox/deploy/xfs-quota-setup-compose.sh
+COPY deploy/xfs-quota-teardown-compose.sh       /opt/sandbox/deploy/xfs-quota-teardown-compose.sh
+RUN chmod 0755 /usr/local/bin/sandbox-quota-helper \
+               /opt/sandbox/deploy/xfs-quota-setup-compose.sh \
+               /opt/sandbox/deploy/xfs-quota-teardown-compose.sh
+
+EXPOSE 8000
+
+# `127.0.0.1` (loopback) is correct *outside* the container; inside
+# the container we bind 0.0.0.0 so compose's `127.0.0.1:8000:8000`
+# port mapping reaches it. The host-side loopback bind keeps the
+# port off the LAN per SPEC-302.
+ENV SANDBOX_BIND_HOST=0.0.0.0 \
+    SANDBOX_BIND_PORT=8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8000/healthz').is_success else 1)" \
+        || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]

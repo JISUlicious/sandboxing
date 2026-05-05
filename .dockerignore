@@ -1,0 +1,33 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Test + dev artefacts.
+tests/
+docs/
+var/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Other images' build contexts (not needed inside control-plane).
+sandbox/
+proxy/
+
+# Editor / OS junk.
+.idea
+.vscode
+.DS_Store
+
+# Plans / scratch.
+*.md
+!README.md
+.env
+.env.*

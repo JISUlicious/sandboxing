@@ -1,0 +1,121 @@
+# Sandbox Service — production deployment via docker compose.
+# See docs/DEPLOY.md for the full walkthrough.
+#
+# Pre-requisites (run once via deploy/setup-host.sh --full):
+#   - Docker Engine + gVisor registered as `runsc`
+#   - Daemon `userns-remap=default`
+#   - /var/lib/sandbox-volumes on XFS or ext4+prjquota
+#   - /etc/sandbox/env populated (cp deploy/.env.compose.example first)
+#   - /etc/projects exists (touched by setup-host.sh)
+#
+# Bring up:
+#   docker compose up -d
+# Tear down (preserves volume / registry / audit on host):
+#   docker compose down
+# Upgrade to a new release:
+#   SANDBOX_VERSION=v0.1.0 docker compose pull
+#   SANDBOX_VERSION=v0.1.0 docker compose up -d
+name: sandbox
+
+networks:
+  # The bridge sandbox containers attach to. Pinned subnet so the
+  # iptables rules in deploy/iptables-setup.sh have a stable target.
+  sandbox_egress:
+    name: sandbox_egress
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${SANDBOX_SUBNET:-172.30.0.0/24}
+    labels:
+      sandbox.managed: "true"
+
+services:
+  # ---------------------------------------------------------------
+  # Squid forward proxy — every sandbox container's only egress hop.
+  # ---------------------------------------------------------------
+  proxy:
+    image: ${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-proxy:${SANDBOX_VERSION:-latest}
+    container_name: sandbox-proxy
+    restart: unless-stopped
+    networks:
+      sandbox_egress:
+        ipv4_address: ${PROXY_IP:-172.30.0.2}
+    volumes:
+      # Operator-managed allowlist. Edit + `docker compose restart proxy`.
+      - ./proxy/allowed-domains.txt:/etc/squid/allowed-domains.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "squidclient -h 127.0.0.1 mgr:info >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------
+  # One-shot warm-up: pull the sandbox-runtime image so the first
+  # CreateSession isn't gated on a multi-MB pull.
+  # ---------------------------------------------------------------
+  image-warmer:
+    image: docker:cli
+    container_name: sandbox-image-warmer
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      docker pull ${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-runtime:${SANDBOX_VERSION:-latest}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # ---------------------------------------------------------------
+  # Control plane — the FastAPI service.
+  # ---------------------------------------------------------------
+  # Why userns_mode: host + CAP_SYS_ADMIN:
+  #   XFS quotactl() checks CAP_SYS_ADMIN against the *initial* user
+  #   namespace, so a userns-remapped control plane can't set quotas.
+  #   The systemd path runs the unit as host root for the same reason
+  #   (deploy/sandbox-api.service / slice 9-4). Cap drop ALL + 4
+  #   explicit caps keeps the privilege footprint tight.
+  control-plane:
+    image: ${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-control-plane:${SANDBOX_VERSION:-latest}
+    container_name: sandbox-control-plane
+    restart: unless-stopped
+    depends_on:
+      - proxy
+      - image-warmer
+    env_file:
+      - /etc/sandbox/env
+    environment:
+      SANDBOX_NETWORK_NAME: "sandbox_egress"
+      SANDBOX_EGRESS_PROXY_URL: "http://${PROXY_IP:-172.30.0.2}:${PROXY_PORT:-3128}"
+      SANDBOX_SANDBOX_IMAGE: "${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-runtime:${SANDBOX_VERSION:-latest}"
+      SANDBOX_QUOTA_SETUP_CMD: "/opt/sandbox/deploy/xfs-quota-setup-compose.sh"
+      SANDBOX_QUOTA_TEARDOWN_CMD: "/opt/sandbox/deploy/xfs-quota-teardown-compose.sh"
+      # The workspace mount path on the host. Override via a `.env`
+      # file next to compose.yml or by exporting before `up`. Must
+      # match the value used by `setup-host.sh` (same env var).
+      # Pick once per host BEFORE the first session — see DEPLOY.md.
+      SANDBOX_QUOTA_VOLUME_BASE: "${SANDBOX_VOLUME_BASE:-/var/lib/sandbox-volumes}"
+    ports:
+      # SPEC-302: bind to host loopback only. Reverse-proxy in front
+      # of this for remote / TLS-terminated access.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/sandbox:/var/lib/sandbox
+      - /var/log/sandbox:/var/log/sandbox
+      - ${SANDBOX_VOLUME_BASE:-/var/lib/sandbox-volumes}:${SANDBOX_VOLUME_BASE:-/var/lib/sandbox-volumes}
+      # /etc/projects is the project-id ↔ path registry xfs_quota
+      # uses; helper appends to it, so :rw not :ro.
+      - /etc/projects:/etc/projects
+    userns_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN          # os.chown(bind_path, dockremap_uid, dockremap_uid)
+      - DAC_OVERRIDE   # write audit log + registry across owners
+      - FOWNER         # chmod 0700 on dirs we just chowned away
+      - SYS_ADMIN      # quotactl() (against init user-ns)
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8000/healthz').is_success else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

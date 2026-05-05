@@ -8,11 +8,11 @@ workspaces, audit log with fail-closed semantics. See
 [SPECIFICATION.md](./SPECIFICATION.md) and
 [ARCHITECTURE.md](./ARCHITECTURE.md) for the contract and the design.
 
-For the install / validation walkthroughs, see
-[docs/SETUP.md](./docs/SETUP.md) and
-[docs/TESTING.md](./docs/TESTING.md). For driving the service from
-Claude Code / Desktop / Cursor over MCP, see
-[docs/MCP.md](./docs/MCP.md).
+- Compose-based production deployment: [docs/DEPLOY.md](./docs/DEPLOY.md).
+- Systemd-based production deployment + dev walkthrough: [docs/SETUP.md](./docs/SETUP.md).
+- End-to-end functional testing: [docs/TESTING.md](./docs/TESTING.md).
+- Driving the service from Claude Code / Desktop / Cursor over MCP:
+  [docs/MCP.md](./docs/MCP.md).
 
 ## Requirements
 
@@ -23,7 +23,23 @@ Claude Code / Desktop / Cursor over MCP, see
   XFS-formatted (or ext4 + `prjquota`) volume directory. See SPEC-400
   and SPEC-302.
 
-## Run locally (dev mode)
+## Quick-start (production, Compose path)
+
+```bash
+git clone https://github.com/JISUlicious/sandboxing
+cd sandboxing
+sudo deploy/setup-host.sh --full --with-xfs-quota
+sudo cp deploy/.env.compose.example /etc/sandbox/env
+sudoedit /etc/sandbox/env                  # set SANDBOX_API_TOKEN + _PEPPER
+sudo docker compose --env-file /etc/sandbox/env up -d
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/healthz
+```
+
+Pulls three published images from `ghcr.io/JISUlicious/sandbox-*`.
+Full walkthrough + trade-offs vs the systemd path:
+[docs/DEPLOY.md](./docs/DEPLOY.md).
+
+## Run locally (dev mode, no Linux host)
 
 ```bash
 uv sync --extra dev
@@ -99,13 +115,15 @@ api/         control-plane source (FastAPI, registry, docker driver,
              exec, files, audit, reaper, metrics)
 sandbox/     Dockerfile for sandbox-runtime
 proxy/       Dockerfile + squid.conf + allowed-domains.txt for sandbox-proxy
+Dockerfile.control-plane, compose.yml, .dockerignore — Compose deployment
 deploy/      iptables-setup.sh, systemd units (sandbox-api,
              sandbox-iptables, sandbox-backup, sandbox.logrotate),
-             setup-host.sh, sandbox-quota-helper.sh, xfs-quota-
-             {setup,teardown}.sh.example
+             setup-host.sh, sandbox-quota-helper.sh, .env.compose.example,
+             xfs-quota-{setup,teardown}{,-compose}.sh{.example,}
 tools/       smoke-remote.sh (e2e smoke), validate-slices.sh (slice
              6/7/8 validation), dump_openapi.py (schema artifact),
              sandbox_tenants.py (tenant + token CLI)
-docs/        SETUP.md (install) and TESTING.md (e2e walkthrough)
+docs/        DEPLOY.md (compose), SETUP.md (systemd + dev),
+             TESTING.md (e2e walkthrough)
 tests/       90 unit tests, all mocked at the DockerClient boundary
 ```

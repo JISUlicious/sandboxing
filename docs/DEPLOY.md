@@ -28,6 +28,15 @@ control plane on the host's Docker daemon — they live on the same
 
 ## Quick-start (Ubuntu / Debian)
 
+> **Before you start:** the Quick-start pulls three images from
+> `ghcr.io/jisulicious/sandbox-*`. On a fresh fork those don't exist
+> until you cut a `v*.*.*` tag (see "Cutting your first release"
+> below) — `docker compose up -d` will fail with
+> `Error Head https://ghcr.io/...: denied`. If you'd rather test
+> against locally-built images first, run the three `docker build`
+> commands from the Troubleshooting section's "denied" entry before
+> the `up -d` step.
+
 ```bash
 git clone https://github.com/JISUlicious/sandboxing
 cd sandboxing
@@ -39,20 +48,33 @@ sudo deploy/setup-host.sh --full --with-xfs-quota
 # 2. Drop in /etc/sandbox/env. Set the two secrets.
 sudo cp deploy/.env.compose.example /etc/sandbox/env
 sudoedit /etc/sandbox/env                    # SANDBOX_API_TOKEN + _PEPPER
-sudo chown root:root /etc/sandbox/env
+sudo chown root:sandbox /etc/sandbox/env
 sudo chmod 0640 /etc/sandbox/env
 
-# 3. Up. The --env-file gives compose access to the same file for
+# 3. Add yourself to the `sandbox` group so docker compose can read
+#    /etc/sandbox/env without sudo. Re-login (or `newgrp sandbox`)
+#    for the group membership to take effect.
+sudo usermod -aG sandbox "$USER"
+newgrp sandbox    # or log out + back in
+
+# 4. Up. The --env-file gives compose access to the same file for
 #    BOTH variable substitution (image tags, bind paths) and the
 #    container's runtime env. See "Customize the workspace volume
 #    path" below for why this matters.
-sudo docker compose --env-file /etc/sandbox/env up -d
+docker compose --env-file /etc/sandbox/env up -d
 
-# 4. Smoke check.
+# 5. Smoke check.
 TOKEN=$(sudo grep API_TOKEN /etc/sandbox/env | cut -d= -f2)
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/healthz
 # {"status":"ok"}
 ```
+
+> **Permission denied on `/etc/sandbox/env`?** This means step 3's
+> group change hasn't taken effect in the current shell. Either run
+> `newgrp sandbox` (or open a fresh shell), or prefix every compose
+> command with `sudo`. The file is `0640 root:sandbox` so it's
+> readable by group members but not world. See "Troubleshooting"
+> below.
 
 `--with-xfs-quota` creates a 50 GiB loopback file at
 `/var/lib/sandbox-fs.img` and mounts it on `/var/lib/sandbox-volumes`
@@ -278,6 +300,107 @@ release run, flip them to public via the GitHub UI:
 
 External adopters need this to `docker pull` without a GHCR auth
 token.
+
+## Troubleshooting
+
+### `open /etc/sandbox/env: permission denied`
+
+Compose reads the file at parse time on the operator's host. The
+file is `0640 root:sandbox`, so the calling user needs to be in
+the `sandbox` group (or you `sudo` the compose command).
+
+```bash
+# Long-term fix — covers every `docker compose ...` call.
+sudo usermod -aG sandbox "$USER"
+newgrp sandbox    # or open a fresh shell
+
+# One-shot — works without modifying group membership.
+sudo docker compose --env-file /etc/sandbox/env up -d
+```
+
+If you accidentally cp'd the file as `root:root` (the system
+default), restore the group:
+
+```bash
+sudo chown root:sandbox /etc/sandbox/env
+sudo chmod 0640 /etc/sandbox/env
+```
+
+### `503 admin_disabled` on `/v1/tenants/*`
+
+`SANDBOX_ADMIN_TOKEN` is unset. The admin surface is opt-in; set
+the env var and restart the control-plane container:
+
+```bash
+echo "SANDBOX_ADMIN_TOKEN=$(openssl rand -hex 32)" \
+    | sudo tee -a /etc/sandbox/env
+docker compose --env-file /etc/sandbox/env restart control-plane
+```
+
+### Docker compose says "no such file" on `deploy/.env.compose.example`
+
+The file shipped from PR #12 onwards. If you cloned an older revision
+or hit the gitignore bug from before that PR, pull the latest main
+and try again — `git status` will show the file as untracked vs.
+already-tracked depending on which side of the fix your clone is
+on.
+
+### `Error Head https://ghcr.io/v2/.../manifests/latest: denied`
+
+The control-plane / runtime / proxy images don't exist on ghcr.io
+yet — most likely because no `v*.*.*` release has been cut, or the
+packages exist but are private (GHCR's default).
+
+**Quick fix — build locally** (you don't need a release to test):
+
+```bash
+docker build -t ghcr.io/jisulicious/sandbox-runtime:latest sandbox/
+docker build -t ghcr.io/jisulicious/sandbox-proxy:latest   proxy/
+docker build -f Dockerfile.control-plane \
+             -t ghcr.io/jisulicious/sandbox-control-plane:latest .
+docker compose --env-file /etc/sandbox/env up -d
+```
+
+Compose's default `pull_policy=missing` finds the locally-built
+images and skips the pull. Forks publishing under a different
+namespace can override via `SANDBOX_IMAGE_NAMESPACE` in
+`/etc/sandbox/env`.
+
+**Proper fix — cut a release tag**:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The GitHub Actions workflow at `.github/workflows/release.yml`
+builds + pushes the three images on every `v*.*.*` tag. After it
+finishes, flip each package to **public** (one-time UI step) per
+the "Image visibility" section above, then:
+
+```bash
+sudo sed -i 's/^SANDBOX_VERSION=.*/SANDBOX_VERSION=v0.1.0/' /etc/sandbox/env
+docker compose --env-file /etc/sandbox/env pull
+docker compose --env-file /etc/sandbox/env up -d
+```
+
+### `runsc not registered` on session create
+
+`docker info | grep runsc` should list it. If empty, run
+`sudo deploy/setup-host.sh --full` to install + register gVisor and
+restart the docker daemon.
+
+### Sessions create but exec hangs
+
+Most often a stale `sandbox_egress` network with a different subnet.
+Stop the stack, drop the network, re-run setup-host.sh:
+
+```bash
+docker compose --env-file /etc/sandbox/env down
+docker network rm sandbox_egress
+sudo deploy/setup-host.sh --full
+docker compose --env-file /etc/sandbox/env up -d
+```
 
 ## What's NOT in this deployment path
 

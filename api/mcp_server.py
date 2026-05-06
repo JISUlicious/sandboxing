@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
 from fastapi import FastAPI
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
@@ -238,7 +238,7 @@ def build_mcp(
             raise _surface_error(exc) from exc
         return {"ok": True}
 
-    # ----- exec (1 tool, sync only for v1) -----
+    # ----- exec (sync + streaming, slice 13) -----
 
     @mcp.tool(
         name="exec",
@@ -246,12 +246,69 @@ def build_mcp(
             "Run a command inside a session and wait for completion. "
             "argv is the program + args (no shell). Returns "
             "stdout/stderr/exit_code. STOPPED sessions auto-resume on "
-            "first exec."
+            "first exec. Streaming output: when the MCP client passes a "
+            "progressToken (per the MCP spec), this tool emits one "
+            "progress notification per stdout/stderr chunk so LLM-"
+            "driven clients can react mid-execution. Final return is "
+            "always the full ExecResponse."
         ),
     )
-    async def exec_(session_id: str, req: ExecRequest) -> ExecResponse:
+    async def exec_(session_id: str, req: ExecRequest, ctx: Context) -> ExecResponse:
+        # Slice 13: if the client included a progressToken, drive
+        # streaming via run_stream + ctx.report_progress for each
+        # chunk. Otherwise fall back to the sync path so simple
+        # clients without progress support get the same fast batch
+        # response we shipped in v1.
+        wants_streaming = (
+            getattr(getattr(ctx, "request_context", None), "meta", None) is not None
+            and getattr(ctx.request_context.meta, "progressToken", None) is not None
+        )
         try:
-            return await exec_service.run(session_id, _tenant_id(), req)
+            if not wants_streaming:
+                return await exec_service.run(session_id, _tenant_id(), req)
+
+            # Streaming path: validate up-front so a bad request gets
+            # a clean error before we open any chunks. ExecService
+            # auto-resumes STOPPED sessions inside run_stream too.
+            from api.exec import ExecService as _ExecService
+
+            _ExecService.validate_stream_request(req)
+
+            stdout_buf = bytearray()
+            stderr_buf = bytearray()
+            truncated_streams: list[str] = []
+            final: ExecResponse | None = None
+
+            chunks_seen = 0
+            async for kind, payload in exec_service.run_stream(session_id, _tenant_id(), req):
+                if kind in ("stdout", "stderr"):
+                    chunks_seen += 1
+                    # `chunk_b64` is what /exec/stream's REST surface
+                    # also emits, so MCP and REST clients see the same
+                    # shape. The progress notification's `message` is
+                    # the new chunk; `progress` is the running chunk
+                    # count (no total — exec output length is unknown).
+                    await ctx.report_progress(
+                        progress=chunks_seen,
+                        message=payload.get("chunk_b64", ""),
+                    )
+                    # Track for the final ExecResponse.
+                    import base64 as _base64
+
+                    raw = _base64.b64decode(payload["chunk_b64"])
+                    (stdout_buf if kind == "stdout" else stderr_buf).extend(raw)
+                elif kind == "truncated":
+                    truncated_streams.append(payload["stream"])
+                elif kind == "result":
+                    final = ExecResponse(**payload)
+                elif kind == "error":
+                    raise RuntimeError(payload.get("message", "exec error"))
+
+            if final is None:
+                # run_stream always emits a result event last; defensive
+                # fallback for SDK quirks.
+                raise RuntimeError("exec stream ended without a result event")
+            return final
         except SandboxError as exc:
             raise _surface_error(exc) from exc
 

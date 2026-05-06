@@ -42,7 +42,45 @@ uses, so MCP and HTTP behave identically.
 
 | Tool | Inputs | Returns | Notes |
 |---|---|---|---|
-| `exec` | `session_id: str, req: ExecRequest` | `ExecResponse` | Synchronous. STOPPED sessions auto-resume on first exec. Streaming exec is not exposed via MCP in v1. |
+| `exec` | `session_id: str, req: ExecRequest` | `ExecResponse` | Sync by default; streams stdout/stderr via MCP **progress notifications** when the client supplies a `progressToken` (see "Streaming output" below). STOPPED sessions auto-resume on first exec. |
+
+#### Streaming output (slice 13)
+
+LLM-driven clients (Claude Code, Claude Desktop, Cursor) that include
+a `progressToken` in the tool call's `_meta` field receive one MCP
+progress notification per stdout/stderr chunk before the final
+`ExecResponse`. Clients without a progress token get the same fast
+sync response v1 shipped with — no behavioural change.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "exec",
+    "arguments": {
+      "session_id": "<sid>",
+      "req": {"argv": ["find", "/usr", "-name", "*.so"]}
+    },
+    "_meta": {"progressToken": "exec-find-1"}
+  }
+}
+```
+
+The progress notification's `message` is the base64-encoded chunk
+(matching the REST `/exec/stream` payload shape); `progress` is the
+running chunk count.
+
+**Operator note**: the v1 deployment ships with `json_response=True`
+in `api/mcp_server.py` because most agent runtimes consume MCP via a
+single batch JSON response. With that setting, progress notifications
+are bundled into the final tool result rather than emitted as
+separate SSE events. To get true over-the-wire streaming for clients
+that prefer it, drop `json_response=True` from `build_mcp()` — the
+SDK will then return SSE-framed responses with intermediate
+`notifications/progress` events. This is a deployment choice, not a
+feature flag at the call site.
 
 ### Files
 

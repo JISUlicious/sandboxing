@@ -26,6 +26,7 @@ from api.docker_client import DockerClient
 from api.errors import Unauthorized
 from api.exec import ExecService
 from api.files import FileService
+from api.idempotency import IdempotencyMiddleware
 from api.mcp_server import attach_to_fastapi as mcp_attach
 from api.mcp_server import build_mcp, mcp_lifespan_context
 from api.models import (
@@ -250,6 +251,18 @@ def create_app(
         from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
         app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+    # Slice 11a: Idempotency-Key replay cache for mutating routes.
+    # Registered AFTER ProxyHeadersMiddleware so the resolved client
+    # IP is correct for any future per-IP caching, and BEFORE the
+    # routing-level auth dependency so the middleware can re-resolve
+    # the bearer to a tenant_id (cache scope is per-tenant).
+    app.add_middleware(
+        IdempotencyMiddleware,
+        settings=settings_,
+        registry=service_.registry,
+        authenticate=authn_.authenticate,
+    )
 
     @app.middleware("http")
     async def metrics_middleware(request: Request, call_next):

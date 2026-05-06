@@ -77,5 +77,9 @@ class Settings(BaseSettings):
     # back to the 0777 mode and warns at startup.
     bind_volume_uid: int | None = None
 
+    # Slice 11a — Idempotency-Key cache TTL. Stripe's reference value
+    # is 24h; tune lower if storage pressure is a concern.
+    idempotency_ttl_s: int = 86_400
+
 
 settings = Settings()

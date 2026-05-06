@@ -26,6 +26,17 @@ class FakeDockerClient:
         self.stopped: list[tuple[str, int]] = []
         self.removed_containers: list[str] = []
         self._counter = 0
+        # Slice 11b background-process simulator. Tests flip processes
+        # to "exited" via `simulate_process_exit(ospid, exit_code)`;
+        # spawn_supervised assigns sequential ospids starting at 1000.
+        self._next_ospid = 1000
+        # ospid → state ("alive" or {"exited": <int>})
+        self._processes: dict[int, dict[str, Any]] = {}
+        # (container_id, abs_path) → bytes  — virtual fs for the
+        # supervisor's pid/exit/log files.
+        self._fs: dict[tuple[str, str], bytes] = {}
+        self.spawn_supervised_calls: list[dict[str, Any]] = []
+        self.signal_pid_calls: list[tuple[str, int, int]] = []
 
         # Slice 2 surface.
         self.exec_calls: list[dict[str, Any]] = []
@@ -184,6 +195,91 @@ class FakeDockerClient:
                 "mode": mode,
             }
         )
+
+    # ----- slice 11b — background-process supervisor -----
+
+    def spawn_supervised(
+        self,
+        *,
+        container_id: str,
+        argv: list[str],
+        env: dict[str, str] | None,
+        cwd: str,
+        pid_path: str,
+        exit_path: str,
+        log_path: str,
+    ) -> str:
+        ospid = self._next_ospid
+        self._next_ospid += 1
+        self._processes[ospid] = {
+            "alive": True,
+            "exit_code": None,
+            "container_id": container_id,
+            "exit_path": exit_path,
+            "log_path": log_path,
+        }
+        # Mimic the real supervisor writing the pid file before exec.
+        self._fs[(container_id, pid_path)] = f"{ospid}\n".encode()
+        self.spawn_supervised_calls.append(
+            {
+                "container_id": container_id,
+                "argv": list(argv),
+                "env": dict(env) if env else None,
+                "cwd": cwd,
+                "pid_path": pid_path,
+                "exit_path": exit_path,
+                "log_path": log_path,
+                "ospid": ospid,
+            }
+        )
+        return f"exec-fake-{ospid}"
+
+    def pid_alive(self, container_id: str, ospid: int) -> bool:
+        state = self._processes.get(ospid)
+        return bool(state and state["alive"])
+
+    def signal_pid(self, container_id: str, ospid: int, sig: int) -> None:
+        self.signal_pid_calls.append((container_id, ospid, sig))
+        # SIGTERM (15) and SIGKILL (9) flip the process to exited
+        # immediately in the simulator. Tests that want the SIGTERM
+        # grace path can pre-set `immune_to_sigterm` on a process.
+        if sig in (15, 9) and ospid in self._processes:
+            state = self._processes[ospid]
+            if state["alive"]:
+                if sig == 15 and state.get("immune_to_sigterm"):
+                    return
+                state["alive"] = False
+                # bash-style: 128 + signal number for signal-killed
+                # processes; tests can override via simulate_process_exit.
+                if state["exit_code"] is None:
+                    state["exit_code"] = 128 + sig
+                self._write_exit_file(state)
+
+    def _write_exit_file(self, state: dict[str, Any]) -> None:
+        """Mimic the supervisor's `trap 'echo $? > exit_path' EXIT`.
+        Called whenever a process transitions to dead in the
+        simulator."""
+        exit_path = state.get("exit_path")
+        cid = state.get("container_id")
+        if exit_path and cid is not None:
+            self._fs[(cid, exit_path)] = f"{state['exit_code']}\n".encode()
+
+    def read_text_in_container(self, container_id: str, abs_path: str) -> str | None:
+        data = self._fs.get((container_id, abs_path))
+        if data is None:
+            return None
+        return data.decode("utf-8", errors="replace")
+
+    def simulate_process_exit(self, ospid: int, exit_code: int = 0) -> None:
+        """Test helper — flip a tracked process to EXITED with the
+        given exit code, including writing the exit file the way the
+        production supervisor's EXIT trap would."""
+        if ospid not in self._processes:
+            raise KeyError(f"ospid {ospid} not tracked")
+        state = self._processes[ospid]
+        state["alive"] = False
+        state["exit_code"] = exit_code
+        self._write_exit_file(state)
 
     def get_archive_file(self, *, container_id: str, abs_path: str) -> tuple[bytes, int]:
         resp = self.get_archive_responses.get(abs_path)

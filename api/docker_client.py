@@ -41,6 +41,13 @@ class ExecOutput:
     truncated_streams: list[str] = field(default_factory=list)
 
 
+def _sh_quote(s: str) -> str:
+    """Single-quote `s` for safe interpolation into a /bin/bash -c
+    string. Wraps in single quotes; escapes embedded single quotes.
+    Used by the slice-11b process supervisor."""
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
 def _wrap_with_timeout(argv: list[str], timeout_s: int) -> list[str]:
     """Prepend coreutils' `timeout` so the wall-clock budget is enforced
     by the kernel rather than by the control plane.
@@ -487,6 +494,80 @@ class DockerClient:
         out, err = api.exec_start(exec_id, detach=False, stream=False, demux=True)
         exit_code = int(api.exec_inspect(exec_id).get("ExitCode") or 0)
         return out or b"", err or b"", exit_code
+
+    # ----- background processes (slice 11b) -----
+
+    def spawn_supervised(
+        self,
+        *,
+        container_id: str,
+        argv: list[str],
+        env: dict[str, str] | None,
+        cwd: str,
+        pid_path: str,
+        exit_path: str,
+        log_path: str,
+    ) -> str:
+        """Detach-spawn `argv` inside the container under a thin bash
+        supervisor that:
+
+        - Writes its own OS PID to `pid_path` *before* `exec`-ing argv,
+          so the supervisor PID == the user-process PID for the
+          lifetime of the process. (Subsequent `kill <pid>` from the
+          control plane reaches the user process directly.)
+        - On EXIT, traps and writes the exit code (or 137 on SIGKILL,
+          143 on SIGTERM as `bash` reports them) to `exit_path`.
+        - Redirects user stdout+stderr into `log_path`.
+
+        Returns the docker exec id (informational; the caller usually
+        cares about the ospid which it reads from `pid_path` after a
+        short delay).
+        """
+        # Single-quote-safe shell rendering of argv.
+        argv_quoted = " ".join(_sh_quote(a) for a in argv)
+        env_lines = "".join(f"export {k}={_sh_quote(v)}\n" for k, v in (env or {}).items())
+        script = (
+            "set +e\n"
+            f"mkdir -p {_sh_quote(posixpath.dirname(pid_path))}\n"
+            f"cd {_sh_quote(cwd)}\n"
+            f"{env_lines}"
+            f'echo "$$" > {_sh_quote(pid_path)}\n'
+            f"trap 'echo $? > {_sh_quote(exit_path)}' EXIT\n"
+            f"exec {argv_quoted} > {_sh_quote(log_path)} 2>&1\n"
+        )
+        api = self.client.api
+        exec_id = api.exec_create(
+            container_id,
+            cmd=["/bin/bash", "-c", script],
+            stdout=False,
+            stderr=False,
+            user="10001:10001",
+            workdir="/workspace",
+        )["Id"]
+        # `detach=True` returns immediately; the bash supervisor stays
+        # alive until argv exits (because of the `exec`, the PID 1
+        # supervisor IS the user process from the kernel's POV).
+        api.exec_start(exec_id, detach=True)
+        return exec_id
+
+    def pid_alive(self, container_id: str, ospid: int) -> bool:
+        """`kill -0 <ospid>` returns 0 iff the process is alive AND
+        the calling user can signal it. Run as the agent UID so the
+        check matches the supervisor's owner."""
+        _, _, rc = self._exec_simple(container_id, ["/bin/kill", "-0", str(ospid)])
+        return rc == 0
+
+    def signal_pid(self, container_id: str, ospid: int, sig: int) -> None:
+        self._exec_simple(container_id, ["/bin/kill", f"-{sig}", str(ospid)])
+
+    def read_text_in_container(self, container_id: str, abs_path: str) -> str | None:
+        """Read a small text file from inside the container, returning
+        None if it doesn't exist. Used to capture exit codes after the
+        supervisor's trap fires."""
+        out, _, rc = self._exec_simple(container_id, ["/bin/cat", "--", abs_path])
+        if rc != 0:
+            return None
+        return out.decode("utf-8", errors="replace")
 
     # ----- files (slice 2) -----
 

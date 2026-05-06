@@ -60,6 +60,32 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_idempotency_expires
     ON idempotency_keys(expires_at);
+
+-- Slice 11b — background processes. One row per spawned process,
+-- rows persist past EXITED so the agent can read the exit_code +
+-- last_output_at after the fact (until DELETE reaps the row or the
+-- session is destroyed).
+CREATE TABLE IF NOT EXISTS processes (
+    id              TEXT PRIMARY KEY,         -- ulid (session-scoped)
+    session_id      TEXT NOT NULL,
+    tenant_id       TEXT NOT NULL,
+    name            TEXT,
+    argv_json       TEXT NOT NULL,
+    cwd             TEXT,
+    restart_policy  TEXT NOT NULL,
+    ospid           INTEGER,                  -- captured after spawn; NULL if spawn failed
+    log_path        TEXT NOT NULL,            -- /workspace-relative path
+    exit_path       TEXT NOT NULL,            -- /workspace-relative path
+    state           TEXT NOT NULL,            -- RUNNING | EXITED
+    exit_code       INTEGER,
+    started_at      INTEGER NOT NULL,
+    exited_at       INTEGER,
+    last_output_at  INTEGER,
+    last_polled_at  INTEGER,                  -- watcher polling throttle
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_processes_session_state
+    ON processes(session_id, state);
 """
 
 # Allowed transitions per ARCH §5.
@@ -100,6 +126,66 @@ class SessionRow:
         self.created_at: int = kw["created_at"]  # type: ignore[assignment]
         self.last_activity_at: int = kw["last_activity_at"]  # type: ignore[assignment]
         self.destroyed_at: int | None = kw.get("destroyed_at")  # type: ignore[assignment]
+
+
+class ProcessRow:
+    __slots__ = (
+        "id",
+        "session_id",
+        "tenant_id",
+        "name",
+        "argv",
+        "cwd",
+        "restart_policy",
+        "ospid",
+        "log_path",
+        "exit_path",
+        "state",
+        "exit_code",
+        "started_at",
+        "exited_at",
+        "last_output_at",
+        "last_polled_at",
+    )
+
+    def __init__(self, **kw: object) -> None:
+        self.id: str = kw["id"]  # type: ignore[assignment]
+        self.session_id: str = kw["session_id"]  # type: ignore[assignment]
+        self.tenant_id: str = kw["tenant_id"]  # type: ignore[assignment]
+        self.name: str | None = kw.get("name")  # type: ignore[assignment]
+        self.argv: list[str] = kw["argv"]  # type: ignore[assignment]
+        self.cwd: str | None = kw.get("cwd")  # type: ignore[assignment]
+        self.restart_policy: str = kw["restart_policy"]  # type: ignore[assignment]
+        self.ospid: int | None = kw.get("ospid")  # type: ignore[assignment]
+        self.log_path: str = kw["log_path"]  # type: ignore[assignment]
+        self.exit_path: str = kw["exit_path"]  # type: ignore[assignment]
+        self.state: str = kw["state"]  # type: ignore[assignment]
+        self.exit_code: int | None = kw.get("exit_code")  # type: ignore[assignment]
+        self.started_at: int = kw["started_at"]  # type: ignore[assignment]
+        self.exited_at: int | None = kw.get("exited_at")  # type: ignore[assignment]
+        self.last_output_at: int | None = kw.get("last_output_at")  # type: ignore[assignment]
+        self.last_polled_at: int | None = kw.get("last_polled_at")  # type: ignore[assignment]
+
+
+def _row_to_process(row: aiosqlite.Row) -> ProcessRow:
+    return ProcessRow(
+        id=row["id"],
+        session_id=row["session_id"],
+        tenant_id=row["tenant_id"],
+        name=row["name"],
+        argv=json.loads(row["argv_json"]),
+        cwd=row["cwd"],
+        restart_policy=row["restart_policy"],
+        ospid=int(row["ospid"]) if row["ospid"] is not None else None,
+        log_path=row["log_path"],
+        exit_path=row["exit_path"],
+        state=row["state"],
+        exit_code=int(row["exit_code"]) if row["exit_code"] is not None else None,
+        started_at=int(row["started_at"]),
+        exited_at=int(row["exited_at"]) if row["exited_at"] is not None else None,
+        last_output_at=(int(row["last_output_at"]) if row["last_output_at"] is not None else None),
+        last_polled_at=(int(row["last_polled_at"]) if row["last_polled_at"] is not None else None),
+    )
 
 
 def _row_to_session(row: aiosqlite.Row) -> SessionRow:
@@ -363,6 +449,128 @@ class Registry:
                 )
                 for row in rows
             ]
+
+    # ----- processes (slice 11b) -----
+
+    async def insert_process(
+        self,
+        *,
+        process_id: str,
+        session_id: str,
+        tenant_id: str,
+        name: str | None,
+        argv: list[str],
+        cwd: str | None,
+        restart_policy: str,
+        ospid: int | None,
+        log_path: str,
+        exit_path: str,
+    ) -> None:
+        ts = now_ms()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO processes (id, session_id, tenant_id, name, argv_json, cwd, "
+                "restart_policy, ospid, log_path, exit_path, state, started_at, last_polled_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?)",
+                (
+                    process_id,
+                    session_id,
+                    tenant_id,
+                    name,
+                    json.dumps(argv),
+                    cwd,
+                    restart_policy,
+                    ospid,
+                    log_path,
+                    exit_path,
+                    ts,
+                    ts,
+                ),
+            )
+            await db.commit()
+
+    async def get_process(
+        self, *, session_id: str, process_id: str, tenant_id: str | None = None
+    ) -> ProcessRow | None:
+        sql = "SELECT * FROM processes WHERE id = ? AND session_id = ?"
+        args: tuple = (process_id, session_id)
+        if tenant_id is not None:
+            sql += " AND tenant_id = ?"
+            args = (process_id, session_id, tenant_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(sql, args)
+            row = await cur.fetchone()
+            return _row_to_process(row) if row else None
+
+    async def list_processes(
+        self, *, session_id: str, tenant_id: str | None = None
+    ) -> Sequence[ProcessRow]:
+        sql = "SELECT * FROM processes WHERE session_id = ?"
+        args: tuple = (session_id,)
+        if tenant_id is not None:
+            sql += " AND tenant_id = ?"
+            args = (session_id, tenant_id)
+        sql += " ORDER BY started_at"
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(sql, args)
+            rows = await cur.fetchall()
+            return [_row_to_process(r) for r in rows]
+
+    async def count_running_processes(self, session_id: str) -> int:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT COUNT(*) AS n FROM processes WHERE session_id = ? AND state = 'RUNNING'",
+                (session_id,),
+            )
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
+
+    async def list_running_processes_unscoped(self, session_id: str) -> Sequence[ProcessRow]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM processes WHERE session_id = ? AND state = 'RUNNING'",
+                (session_id,),
+            )
+            rows = await cur.fetchall()
+            return [_row_to_process(r) for r in rows]
+
+    async def mark_process_exited(
+        self,
+        *,
+        process_id: str,
+        exit_code: int | None,
+        last_output_at: int | None = None,
+    ) -> None:
+        ts = now_ms()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE processes SET state = 'EXITED', exit_code = ?, "
+                "exited_at = ?, last_polled_at = ?, "
+                "last_output_at = COALESCE(?, last_output_at) "
+                "WHERE id = ? AND state = 'RUNNING'",
+                (exit_code, ts, ts, last_output_at, process_id),
+            )
+            await db.commit()
+
+    async def touch_process_polled(self, process_id: str) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE processes SET last_polled_at = ? WHERE id = ?",
+                (now_ms(), process_id),
+            )
+            await db.commit()
+
+    async def delete_process(self, *, session_id: str, process_id: str) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM processes WHERE session_id = ? AND id = ?",
+                (session_id, process_id),
+            )
+            await db.commit()
 
     # ----- idempotency-keys (slice 11a) -----
 

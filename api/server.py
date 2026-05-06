@@ -36,9 +36,13 @@ from api.models import (
     ExecResponse,
     FileListResponse,
     FileWriteRequest,
+    ProcessListResponse,
+    ProcessResponse,
     RotateTokenResponse,
     SessionResponse,
+    StartProcessRequest,
 )
+from api.processes import ProcessService
 from api.reaper import Reaper
 from api.registry import Registry, SessionRow
 from api.sampler import SessionSampler
@@ -72,6 +76,13 @@ TAGS_METADATA = [
         "description": "Run commands inside a session. Sync and Server-Sent-Events streaming.",
     },
     {"name": "Files", "description": "Read, write, list, and delete files under `/workspace`."},
+    {
+        "name": "Processes",
+        "description": (
+            "Start / stop / inspect long-running background processes inside a "
+            "session. Slice 11b — survives across exec calls (SPEC-...)."
+        ),
+    },
     {"name": "Tenants", "description": "Token rotation and other tenant-scoped admin."},
     {"name": "Operations", "description": "Liveness, readiness, and Prometheus metrics."},
 ]
@@ -174,6 +185,17 @@ def create_app(
         audit=service_.audit,
     )
     authn_ = TokenAuthenticator(settings=settings_, registry=service_.registry)
+    process_service_ = ProcessService(
+        settings=settings_,
+        registry=service_.registry,
+        docker=service_.docker,
+        audit=service_.audit,
+        sessions=service_,
+    )
+    # Slice 11b: SessionService.destroy reaps background processes
+    # before container removal via this hook (avoids a circular
+    # SessionService ↔ ProcessService dep).
+    service_.set_destroy_hook(process_service_.reap_session_processes)
     mcp_ = build_mcp(
         sessions=service_,
         exec_service=exec_service_,
@@ -242,6 +264,7 @@ def create_app(
     app.state.reaper = reaper_
     app.state.sampler = sampler_
     app.state.mcp = mcp_
+    app.state.processes = process_service_
 
     # Slice 8e: TLS-readiness — when running behind a reverse proxy
     # that terminates TLS (Caddy / nginx in deploy/tls/*.example),
@@ -662,6 +685,70 @@ def create_app(
             token=new_plaintext,
             old_token_grace_seconds=grace,
             tenant_id=tenant_id,
+        )
+
+    # ----- background processes (slice 11b) -----
+
+    @app.post(
+        "/v1/sessions/{session_id}/processes",
+        tags=["Processes"],
+        summary="Start a background process",
+        status_code=201,
+        response_model=ProcessResponse,
+        responses={
+            **ERR_BAD_REQUEST,
+            **ERR_UNAUTHORIZED,
+            **ERR_NOT_FOUND_SESSION,
+            **ERR_CONFLICT,
+            **ERR_RATE_LIMIT,
+        },
+    )
+    async def start_process(
+        session_id: str,
+        req: StartProcessRequest,
+        tenant_id: str = Depends(auth),
+    ) -> ProcessResponse:
+        return await process_service_.start(session_id=session_id, tenant_id=tenant_id, req=req)
+
+    @app.get(
+        "/v1/sessions/{session_id}/processes",
+        tags=["Processes"],
+        summary="List a session's processes",
+        response_model=ProcessListResponse,
+        responses={**ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
+    )
+    async def list_processes(
+        session_id: str, tenant_id: str = Depends(auth)
+    ) -> ProcessListResponse:
+        entries = await process_service_.list(session_id=session_id, tenant_id=tenant_id)
+        return ProcessListResponse(entries=entries)
+
+    @app.get(
+        "/v1/sessions/{session_id}/processes/{process_id}",
+        tags=["Processes"],
+        summary="Get one process",
+        response_model=ProcessResponse,
+        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
+    )
+    async def get_process(
+        session_id: str, process_id: str, tenant_id: str = Depends(auth)
+    ) -> ProcessResponse:
+        return await process_service_.get(
+            session_id=session_id, tenant_id=tenant_id, process_id=process_id
+        )
+
+    @app.delete(
+        "/v1/sessions/{session_id}/processes/{process_id}",
+        tags=["Processes"],
+        summary="Stop and delete a process",
+        response_model=ProcessResponse,
+        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
+    )
+    async def delete_process(
+        session_id: str, process_id: str, tenant_id: str = Depends(auth)
+    ) -> ProcessResponse:
+        return await process_service_.delete(
+            session_id=session_id, tenant_id=tenant_id, process_id=process_id
         )
 
     # MCP Streamable HTTP endpoint at /mcp. Mounted LAST so all

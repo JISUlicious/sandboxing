@@ -27,6 +27,9 @@ class Limits(BaseModel):
     pids: int = Field(256, ge=16)
     nofile: int = Field(1024, ge=64)
     exec_timeout_s: int = Field(60, ge=1)
+    # Slice 11b — concurrent background processes per session. Tenant
+    # max in Settings.tenant_max_processes (default 32).
+    max_processes: int = Field(8, ge=0)
 
 
 class CreateSessionRequest(BaseModel):
@@ -84,6 +87,46 @@ class FileListResponse(BaseModel):
 
 
 # ----- tenants + tokens (SPEC-405) -----
+
+
+# ----- background processes (slice 11b) -----
+
+
+ProcessState = Literal["RUNNING", "EXITED"]
+RestartPolicy = Literal["never"]
+# `on_failure` / `always` are reserved for a follow-up — slice 11b
+# only ships `never` so the supervisor doesn't grow restart logic on
+# the critical path.
+
+
+class StartProcessRequest(BaseModel):
+    argv: list[str] = Field(min_length=1)
+    name: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Operator-friendly label for the process. Free-form.",
+    )
+    env: dict[str, str] | None = None
+    cwd: str | None = Field(
+        default=None,
+        description="Working directory inside /workspace. Defaults to /workspace.",
+    )
+    restart_policy: RestartPolicy = "never"
+
+
+class ProcessResponse(BaseModel):
+    process_id: str
+    name: str | None
+    argv: list[str]
+    state: ProcessState
+    exit_code: int | None
+    started_at: int
+    exited_at: int | None
+    last_output_at: int | None
+
+
+class ProcessListResponse(BaseModel):
+    entries: list[ProcessResponse]
 
 
 class RotateTokenResponse(BaseModel):

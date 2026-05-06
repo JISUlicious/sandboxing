@@ -81,5 +81,17 @@ class Settings(BaseSettings):
     # is 24h; tune lower if storage pressure is a concern.
     idempotency_ttl_s: int = 86_400
 
+    # Slice 11b — background-process tunables.
+    # `process_watcher_interval_s` paces the lazy state refresh on
+    # `GET /processes`/`/processes/{pid}` calls — we don't poll
+    # liveness more often than this for a given row to avoid
+    # hammering the docker daemon.
+    process_watcher_interval_s: float = 2.0
+    # SIGTERM → wait → SIGKILL grace window on `DELETE /processes/{pid}`.
+    process_stop_grace_s: int = 10
+    # Tenant-wide ceiling on `Limits.max_processes`. The Limits default
+    # is 8; operators raise the per-session field with the clamp here.
+    tenant_max_processes: int = 32
+
 
 settings = Settings()

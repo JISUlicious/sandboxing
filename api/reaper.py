@@ -92,6 +92,12 @@ class Reaper:
 
         idle_candidates = await self._registry.list_idle_running(now_ms - idle_ms)
         for row in idle_candidates:
+            # Slice 11b: a session with running background processes
+            # is NOT idle even if no exec calls have come in. The
+            # hard-destroy TTL still applies as the defensive bound.
+            running_procs = await self._registry.count_running_processes(row.id)
+            if running_procs > 0:
+                continue
             try:
                 await self._sessions.reap_stop(row, reason="idle")
             except Exception:

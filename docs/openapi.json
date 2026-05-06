@@ -242,6 +242,12 @@
             "title": "Exec Timeout S",
             "type": "integer"
           },
+          "max_processes": {
+            "default": 8,
+            "minimum": 0.0,
+            "title": "Max Processes",
+            "type": "integer"
+          },
           "memory_mib": {
             "default": 2048,
             "minimum": 64.0,
@@ -274,6 +280,105 @@
           }
         },
         "title": "Limits",
+        "type": "object"
+      },
+      "ProcessListResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ProcessResponse"
+            },
+            "title": "Entries",
+            "type": "array"
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "title": "ProcessListResponse",
+        "type": "object"
+      },
+      "ProcessResponse": {
+        "properties": {
+          "argv": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Argv",
+            "type": "array"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "exited_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exited At"
+          },
+          "last_output_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Output At"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "process_id": {
+            "title": "Process Id",
+            "type": "string"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "RUNNING",
+              "EXITED"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "process_id",
+          "name",
+          "argv",
+          "state",
+          "exit_code",
+          "started_at",
+          "exited_at",
+          "last_output_at"
+        ],
+        "title": "ProcessResponse",
         "type": "object"
       },
       "RotateTokenResponse": {
@@ -344,6 +449,68 @@
           "last_activity_at"
         ],
         "title": "SessionResponse",
+        "type": "object"
+      },
+      "StartProcessRequest": {
+        "properties": {
+          "argv": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Argv",
+            "type": "array"
+          },
+          "cwd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Working directory inside /workspace. Defaults to /workspace.",
+            "title": "Cwd"
+          },
+          "env": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Operator-friendly label for the process. Free-form.",
+            "title": "Name"
+          },
+          "restart_policy": {
+            "const": "never",
+            "default": "never",
+            "title": "Restart Policy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "argv"
+        ],
+        "title": "StartProcessRequest",
         "type": "object"
       },
       "ValidationError": {
@@ -1315,6 +1482,392 @@
         ]
       }
     },
+    "/v1/sessions/{session_id}/processes": {
+      "get": {
+        "operationId": "list_processes_v1_sessions__session_id__processes_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List a session's processes",
+        "tags": [
+          "Processes"
+        ]
+      },
+      "post": {
+        "operationId": "start_process_v1_sessions__session_id__processes_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartProcessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session is in a state that doesn't allow this operation (`invalid_state`)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Tenant concurrency or per-field limit exceeded (`limit_exceeded`). SPEC \u00a76."
+          }
+        },
+        "summary": "Start a background process",
+        "tags": [
+          "Processes"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/processes/{process_id}": {
+      "delete": {
+        "operationId": "delete_process_v1_sessions__session_id__processes__process_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "process_id",
+            "required": true,
+            "schema": {
+              "title": "Process Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop and delete a process",
+        "tags": [
+          "Processes"
+        ]
+      },
+      "get": {
+        "operationId": "get_process_v1_sessions__session_id__processes__process_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "process_id",
+            "required": true,
+            "schema": {
+              "title": "Process Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get one process",
+        "tags": [
+          "Processes"
+        ]
+      }
+    },
     "/v1/sessions/{session_id}/resume": {
       "post": {
         "description": "Restarts the container for a `STOPPED` or `IDLE` session. Process state from before the stop is gone \u2014 only filesystem state persists (ARCH \u00a73.4).",
@@ -1566,6 +2119,10 @@
     {
       "description": "Read, write, list, and delete files under `/workspace`.",
       "name": "Files"
+    },
+    {
+      "description": "Start / stop / inspect long-running background processes inside a session. Slice 11b \u2014 survives across exec calls (SPEC-...).",
+      "name": "Processes"
     },
     {
       "description": "Token rotation and other tenant-scoped admin.",

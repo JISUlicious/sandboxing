@@ -44,6 +44,19 @@ class SessionService:
         self.audit = audit
         self._locks_meta = asyncio.Lock()
         self._locks: dict[str, asyncio.Lock] = {}
+        # Slice 11b: optional callable invoked at the top of
+        # `_destroy_locked` to clean up per-session resources owned
+        # by other services (today: ProcessService.reap_session_processes).
+        # `None` while the SessionService is the only collaborator.
+        self._destroy_hook = None  # type: ignore[var-annotated]
+
+    def set_destroy_hook(self, hook) -> None:
+        """Register a coroutine called as `await hook(SessionRow)` at
+        the start of session destroy. Used by ProcessService to
+        SIGKILL background processes before the container is
+        removed. Replacing an existing hook is intentional —
+        composition is single-collaborator for v1."""
+        self._destroy_hook = hook
 
     async def _lock_for(self, session_id: str) -> asyncio.Lock:
         async with self._locks_meta:
@@ -205,6 +218,14 @@ class SessionService:
         """Shared destroy body assuming the per-session lock is already held."""
         await self.registry.transition(row.id, "DESTROYING")  # step 1
         try:
+            # Slice 11b: reap background processes BEFORE container
+            # removal. Hook is set by lifespan when ProcessService
+            # is constructed; None for tests / minimal embeddings.
+            if self._destroy_hook is not None:
+                try:
+                    await self._destroy_hook(row)
+                except Exception:
+                    log.exception("destroy_hook failed for %s; continuing", row.id)
             if row.container_id:
                 await asyncio.to_thread(self.docker.remove_container, row.container_id)  # step 2
             # Quota teardown before volume removal — the operator script

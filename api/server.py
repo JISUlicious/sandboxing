@@ -24,7 +24,7 @@ from api.audit import AuditEmitter
 from api.auth import TokenAuthenticator, bootstrap_default_tenant
 from api.config import Settings, settings
 from api.docker_client import DockerClient
-from api.errors import Unauthorized
+from api.errors import InvalidArgument, Unauthorized
 from api.exec import ExecService
 from api.files import FileService
 from api.idempotency import IdempotencyMiddleware
@@ -32,16 +32,25 @@ from api.mcp_server import attach_to_fastapi as mcp_attach
 from api.mcp_server import build_mcp, mcp_lifespan_context
 from api.models import (
     CreateSessionRequest,
+    CreateTenantRequest,
+    DeleteTenantResponse,
     ErrorResponse,
     ExecRequest,
     ExecResponse,
     FileListResponse,
     FileWriteRequest,
+    IssueTokenRequest,
+    IssueTokenResponse,
     ProcessListResponse,
     ProcessResponse,
     RotateTokenResponse,
     SessionResponse,
     StartProcessRequest,
+    TenantLimits,
+    TenantListResponse,
+    TenantResponse,
+    TenantUsageResponse,
+    UpdateTenantRequest,
 )
 from api.processes import ProcessService
 from api.reaper import Reaper
@@ -313,6 +322,50 @@ def create_app(
         token = authorization.removeprefix("Bearer ").strip()
         return await authn_.authenticate(token)
 
+    async def auth_full(authorization: str | None = Header(default=None)):
+        """Slice 12: scope-aware auth dependency. Returns AuthContext."""
+        if not authorization or not authorization.startswith("Bearer "):
+            raise Unauthorized()
+        token = authorization.removeprefix("Bearer ").strip()
+        return await authn_.authenticate_full(token)
+
+    def require_scope(scope: str):
+        """Dependency factory: a route declares
+        `Depends(require_scope('exec'))`. Raises 403 forbidden_scope
+        when the bearer's scopes don't include `scope`. Admin tokens
+        and tokens with `scopes is None` (back-compat) pass."""
+        from api.auth import has_scope as _has_scope
+
+        async def _dep(authorization: str | None = Header(default=None)) -> str:
+            ctx = await auth_full(authorization)
+            if not _has_scope(ctx, scope):
+                from api.auth import ForbiddenScope
+
+                raise ForbiddenScope(scope)
+            return ctx.tenant_id
+
+        return _dep
+
+    async def require_admin(authorization: str | None = Header(default=None)) -> str:
+        """Slice 12: admin-only routes. Returns the admin tenant_id."""
+        if not settings_.admin_token:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "admin_disabled",
+                    "message": (
+                        "SANDBOX_ADMIN_TOKEN is not set; admin endpoints are "
+                        "disabled. Set the env var and restart to enable."
+                    ),
+                },
+            )
+        ctx = await auth_full(authorization)
+        if not ctx.is_admin:
+            raise Unauthorized()
+        return ctx.tenant_id
+
     async def auth_with_token_id(
         authorization: str | None = Header(default=None),
     ) -> tuple[str, str]:
@@ -328,7 +381,7 @@ def create_app(
         row = await service_.registry.lookup_token(digest)
         if row is None:
             raise Unauthorized()
-        token_id, tenant_id, revoked_at = row
+        token_id, tenant_id, revoked_at, _scopes = row
         if revoked_at is not None:
             import time as _time
 
@@ -402,7 +455,7 @@ def create_app(
         responses={**ERR_UNAUTHORIZED, **ERR_RATE_LIMIT},
     )
     async def create_session(
-        req: CreateSessionRequest, tenant: str = Depends(auth)
+        req: CreateSessionRequest, tenant: str = Depends(require_scope("session_create"))
     ) -> SessionResponse:
         return _to_response(await service_.create(tenant, req.limits))
 
@@ -458,7 +511,9 @@ def create_app(
         ),
         responses={**ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
     )
-    async def destroy_session(session_id: str, tenant: str = Depends(auth)) -> None:
+    async def destroy_session(
+        session_id: str, tenant: str = Depends(require_scope("session_destroy"))
+    ) -> None:
         await service_.destroy(session_id, tenant)
 
     # ----- exec -----
@@ -487,7 +542,7 @@ def create_app(
         },
     )
     async def exec_session(
-        session_id: str, req: ExecRequest, tenant: str = Depends(auth)
+        session_id: str, req: ExecRequest, tenant: str = Depends(require_scope("exec"))
     ) -> ExecResponse:
         return await exec_service_.run(session_id, tenant, req)
 
@@ -526,7 +581,7 @@ def create_app(
         },
     )
     async def exec_session_stream(
-        session_id: str, req: ExecRequest, tenant: str = Depends(auth)
+        session_id: str, req: ExecRequest, tenant: str = Depends(require_scope("exec"))
     ) -> StreamingResponse:
         # Pre-flight validation runs synchronously so a bad request gets
         # a clean 400 instead of being buried inside a half-flushed SSE.
@@ -576,7 +631,9 @@ def create_app(
         },
     )
     async def write_file(
-        session_id: str, req: FileWriteRequest, tenant: str = Depends(auth)
+        session_id: str,
+        req: FileWriteRequest,
+        tenant: str = Depends(require_scope("file_write")),
     ) -> dict[str, object]:
         return await file_service_.write(session_id, tenant, req)
 
@@ -596,7 +653,7 @@ def create_app(
         dir: str = Query(
             default="", description="Path relative to `/workspace`. Empty = list `/workspace`."
         ),
-        tenant: str = Depends(auth),
+        tenant: str = Depends(require_scope("file_read")),
     ) -> FileListResponse:
         return await file_service_.list_dir(session_id, tenant, dir)
 
@@ -626,7 +683,9 @@ def create_app(
             **ERR_BAD_REQUEST,
         },
     )
-    async def read_file(session_id: str, path: str, tenant: str = Depends(auth)) -> Response:
+    async def read_file(
+        session_id: str, path: str, tenant: str = Depends(require_scope("file_read"))
+    ) -> Response:
         content, mode = await file_service_.read(session_id, tenant, path)
         # Raw bytes; clients that want JSON can base64 the result themselves.
         return Response(
@@ -657,7 +716,7 @@ def create_app(
         recursive: bool = Query(
             default=False, description="Required to delete a non-empty directory."
         ),
-        tenant: str = Depends(auth),
+        tenant: str = Depends(require_scope("file_delete")),
     ) -> None:
         await file_service_.delete(session_id, tenant, path, recursive=recursive)
 
@@ -689,6 +748,291 @@ def create_app(
             tenant_id=tenant_id,
         )
 
+    # ----- tenant management API (slice 12, admin-scoped) -----
+
+    def _tenant_dict_to_response(tenant: dict) -> TenantResponse:
+        return TenantResponse(
+            tenant_id=tenant["id"],
+            display_name=tenant["display_name"],
+            created_at=tenant["created_at"],
+            limits=TenantLimits(
+                max_concurrency=tenant.get("max_concurrency"),
+                max_workspace_gib=tenant.get("max_workspace_gib"),
+                max_exec_timeout_s=tenant.get("max_exec_timeout_s"),
+            ),
+            egress_allowlist=tenant.get("egress_allowlist"),
+            active_token_count=tenant.get("active_token_count", 0),
+        )
+
+    @app.post(
+        "/v1/tenants",
+        response_model=TenantResponse,
+        status_code=201,
+        tags=["Tenants"],
+        summary="Create a tenant (admin)",
+        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED},
+    )
+    async def create_tenant(
+        req: CreateTenantRequest,
+        _admin: str = Depends(require_admin),
+    ) -> TenantResponse:
+        tid = req.name
+        existing = await service_.registry.get_tenant_full(tid)
+        if existing is not None:
+            raise InvalidArgument(f"tenant '{tid}' already exists")
+        await service_.registry.create_tenant(
+            tid,
+            req.display_name or tid,
+            max_concurrency=req.limits.max_concurrency if req.limits else None,
+            max_workspace_gib=req.limits.max_workspace_gib if req.limits else None,
+            max_exec_timeout_s=req.limits.max_exec_timeout_s if req.limits else None,
+            egress_allowlist=req.egress_allowlist,
+        )
+        tenant = await service_.registry.get_tenant_full(tid)
+        assert tenant is not None
+        tenant["active_token_count"] = 0
+        await service_.audit.emit(
+            kind="tenant.create", tenant=tid, session=None, payload={"by": "admin"}
+        )
+        return _tenant_dict_to_response(tenant)
+
+    @app.get(
+        "/v1/tenants",
+        response_model=TenantListResponse,
+        tags=["Tenants"],
+        summary="List tenants (admin)",
+        responses={**ERR_UNAUTHORIZED},
+    )
+    async def list_tenants(
+        _admin: str = Depends(require_admin),
+    ) -> TenantListResponse:
+        rows = await service_.registry.list_tenants_full()
+        entries: list[TenantResponse] = []
+        for row in rows:
+            row["active_token_count"] = await service_.registry.count_active_tokens(row["id"])
+            entries.append(_tenant_dict_to_response(row))
+        return TenantListResponse(entries=entries)
+
+    @app.get(
+        "/v1/tenants/{tenant_id}",
+        response_model=TenantResponse,
+        tags=["Tenants"],
+        summary="Get a tenant (admin)",
+        responses={**ERR_UNAUTHORIZED},
+    )
+    async def get_tenant(
+        tenant_id: str,
+        _admin: str = Depends(require_admin),
+    ) -> TenantResponse:
+        tenant = await service_.registry.get_tenant_full(tenant_id)
+        if tenant is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "tenant_not_found", "message": tenant_id},
+            )
+        tenant["active_token_count"] = await service_.registry.count_active_tokens(tenant_id)
+        return _tenant_dict_to_response(tenant)
+
+    @app.patch(
+        "/v1/tenants/{tenant_id}",
+        response_model=TenantResponse,
+        tags=["Tenants"],
+        summary="Update a tenant's limits / display_name / allowlist (admin)",
+        responses={**ERR_UNAUTHORIZED, **ERR_BAD_REQUEST},
+    )
+    async def update_tenant(
+        tenant_id: str,
+        req: UpdateTenantRequest,
+        _admin: str = Depends(require_admin),
+    ) -> TenantResponse:
+        tenant = await service_.registry.get_tenant_full(tenant_id)
+        if tenant is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "tenant_not_found", "message": tenant_id},
+            )
+        kw: dict = {}
+        if req.display_name is not None:
+            kw["display_name"] = req.display_name
+        if req.limits is not None:
+            kw["max_concurrency"] = req.limits.max_concurrency
+            kw["max_workspace_gib"] = req.limits.max_workspace_gib
+            kw["max_exec_timeout_s"] = req.limits.max_exec_timeout_s
+        if req.egress_allowlist is not None:
+            kw["egress_allowlist"] = req.egress_allowlist
+        await service_.registry.update_tenant(tenant_id, **kw)
+        tenant = await service_.registry.get_tenant_full(tenant_id)
+        assert tenant is not None
+        tenant["active_token_count"] = await service_.registry.count_active_tokens(tenant_id)
+        return _tenant_dict_to_response(tenant)
+
+    @app.delete(
+        "/v1/tenants/{tenant_id}",
+        response_model=DeleteTenantResponse,
+        tags=["Tenants"],
+        summary="Delete a tenant (admin)",
+        description=(
+            "Revokes ALL tokens for the tenant immediately, marks all "
+            "non-terminal sessions DESTROYING (the reaper will finish "
+            "them on its next tick), and drops the tenants row. "
+            "Irreversible."
+        ),
+        responses={**ERR_UNAUTHORIZED},
+    )
+    async def delete_tenant(
+        tenant_id: str,
+        _admin: str = Depends(require_admin),
+    ) -> DeleteTenantResponse:
+        tenant = await service_.registry.get_tenant_full(tenant_id)
+        if tenant is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "tenant_not_found", "message": tenant_id},
+            )
+        revoked = await service_.registry.revoke_all_tenant_tokens(tenant_id)
+        # Schedule existing non-terminal sessions for destroy on the
+        # next reaper tick rather than blocking the request.
+        non_terminal = await service_.registry.list_non_terminal()
+        sessions_destroyed = 0
+        for s in non_terminal:
+            if s.tenant_id != tenant_id:
+                continue
+            try:
+                await service_.reap_destroy(s, reason="tenant_deleted")
+                sessions_destroyed += 1
+            except Exception:
+                log.exception("reap_destroy failed for %s", s.id)
+        await service_.registry.delete_tenant(tenant_id)
+        await service_.audit.emit(
+            kind="tenant.delete",
+            tenant=tenant_id,
+            session=None,
+            payload={"sessions_destroyed": sessions_destroyed, "tokens_revoked": revoked},
+        )
+        return DeleteTenantResponse(
+            tenant_id=tenant_id,
+            sessions_destroyed=sessions_destroyed,
+            tokens_revoked=revoked,
+        )
+
+    @app.post(
+        "/v1/tenants/{tenant_id}/tokens",
+        response_model=IssueTokenResponse,
+        status_code=201,
+        tags=["Tenants"],
+        summary="Issue a token for a tenant (admin)",
+        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED},
+    )
+    async def issue_token(
+        tenant_id: str,
+        req: IssueTokenRequest,
+        _admin: str = Depends(require_admin),
+    ) -> IssueTokenResponse:
+        tenant = await service_.registry.get_tenant_full(tenant_id)
+        if tenant is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "tenant_not_found", "message": tenant_id},
+            )
+        from api.auth import generate_token_plaintext
+
+        plaintext = generate_token_plaintext()
+        token_id = await authn_.issue_initial_token(
+            tenant_id,
+            plaintext,
+            scopes=list(req.scopes) if req.scopes is not None else None,
+            note=req.note,
+        )
+        info = await service_.registry.get_token_by_id(token_id)
+        assert info is not None
+        await service_.audit.emit(
+            kind="tenant.token.issue",
+            tenant=tenant_id,
+            session=None,
+            payload={"token_id": token_id, "scopes": req.scopes, "note": req.note},
+        )
+        return IssueTokenResponse(
+            token_id=token_id,
+            token=plaintext,
+            tenant_id=tenant_id,
+            scopes=info["scopes"],
+            issued_at=info["issued_at"],
+        )
+
+    @app.delete(
+        "/v1/tenants/{tenant_id}/tokens/{token_id}",
+        tags=["Tenants"],
+        summary="Revoke one token (admin)",
+        status_code=204,
+        responses={**ERR_UNAUTHORIZED},
+    )
+    async def revoke_token_route(
+        tenant_id: str,
+        token_id: str,
+        _admin: str = Depends(require_admin),
+    ) -> Response:
+        info = await service_.registry.get_token_by_id(token_id)
+        if info is None or info["tenant_id"] != tenant_id:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "token_not_found", "message": token_id},
+            )
+        # Slice 12: admin revocation is immediate (no grace), unlike
+        # the self-rotate path which carries a `token_grace_seconds`
+        # window.
+        await service_.registry.revoke_token(token_id, revoke_at_ms=int(time.time() * 1000))
+        await service_.audit.emit(
+            kind="tenant.token.revoke",
+            tenant=tenant_id,
+            session=None,
+            payload={"token_id": token_id},
+        )
+        return Response(status_code=204)
+
+    @app.get(
+        "/v1/tenants/{tenant_id}/usage",
+        response_model=TenantUsageResponse,
+        tags=["Tenants"],
+        summary="Tenant usage snapshot (admin or owner)",
+        responses={**ERR_UNAUTHORIZED},
+    )
+    async def get_tenant_usage(
+        tenant_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> TenantUsageResponse:
+        # Admin OR owner. Resolve full context to know which.
+        ctx = await auth_full(authorization)
+        if not ctx.is_admin and ctx.tenant_id != tenant_id:
+            raise Unauthorized()
+        tenant = await service_.registry.get_tenant_full(tenant_id)
+        if tenant is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "tenant_not_found", "message": tenant_id},
+            )
+        concurrent = await service_.registry.count_concurrent(tenant_id)
+        max_conc = tenant.get("max_concurrency") or settings_.tenant_max_concurrent
+        active_tokens = await service_.registry.count_active_tokens(tenant_id)
+        return TenantUsageResponse(
+            tenant_id=tenant_id,
+            concurrent_sessions=concurrent,
+            max_concurrency=max_conc,
+            workspace_bytes=None,  # Quota tracking is filesystem-side; not populated here.
+            active_token_count=active_tokens,
+        )
+
     # ----- background processes (slice 11b) -----
 
     @app.post(
@@ -708,7 +1052,7 @@ def create_app(
     async def start_process(
         session_id: str,
         req: StartProcessRequest,
-        tenant_id: str = Depends(auth),
+        tenant_id: str = Depends(require_scope("processes")),
     ) -> ProcessResponse:
         return await process_service_.start(session_id=session_id, tenant_id=tenant_id, req=req)
 
@@ -720,7 +1064,7 @@ def create_app(
         responses={**ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
     )
     async def list_processes(
-        session_id: str, tenant_id: str = Depends(auth)
+        session_id: str, tenant_id: str = Depends(require_scope("processes"))
     ) -> ProcessListResponse:
         entries = await process_service_.list(session_id=session_id, tenant_id=tenant_id)
         return ProcessListResponse(entries=entries)
@@ -733,7 +1077,7 @@ def create_app(
         responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
     )
     async def get_process(
-        session_id: str, process_id: str, tenant_id: str = Depends(auth)
+        session_id: str, process_id: str, tenant_id: str = Depends(require_scope("processes"))
     ) -> ProcessResponse:
         return await process_service_.get(
             session_id=session_id, tenant_id=tenant_id, process_id=process_id
@@ -747,7 +1091,7 @@ def create_app(
         responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
     )
     async def delete_process(
-        session_id: str, process_id: str, tenant_id: str = Depends(auth)
+        session_id: str, process_id: str, tenant_id: str = Depends(require_scope("processes"))
     ) -> ProcessResponse:
         return await process_service_.delete(
             session_id=session_id, tenant_id=tenant_id, process_id=process_id
@@ -760,7 +1104,7 @@ def create_app(
         responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
     )
     async def stream_process_logs(
-        session_id: str, process_id: str, tenant_id: str = Depends(auth)
+        session_id: str, process_id: str, tenant_id: str = Depends(require_scope("processes"))
     ) -> StreamingResponse:
         # Validate the (session, process) pair before opening the SSE
         # body so 404 / 400 is a plain HTTP error, not a half-flushed

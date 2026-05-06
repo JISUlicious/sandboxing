@@ -139,6 +139,129 @@ class ProcessListResponse(BaseModel):
     entries: list[ProcessResponse]
 
 
+# ----- tenant management + scoped tokens (slice 12) -----
+
+
+# The closed set of scopes a token can carry. NULL / empty in storage
+# means "all scopes" (back-compat for tokens issued before slice 12).
+Scope = Literal[
+    "session_create",
+    "session_destroy",
+    "exec",
+    "file_read",
+    "file_write",
+    "file_delete",
+    "processes",
+    "tokens_rotate",
+]
+
+
+ALL_SCOPES: tuple[str, ...] = (
+    "session_create",
+    "session_destroy",
+    "exec",
+    "file_read",
+    "file_write",
+    "file_delete",
+    "processes",
+    "tokens_rotate",
+)
+
+
+class TenantLimits(BaseModel):
+    """Per-tenant overrides for the global Settings.tenant_max_*
+    defaults. Each field None ⇒ inherit the global default."""
+
+    max_concurrency: int | None = Field(default=None, ge=1)
+    max_workspace_gib: int | None = Field(default=None, ge=1)
+    max_exec_timeout_s: int | None = Field(default=None, ge=1)
+
+
+class CreateTenantRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    display_name: str | None = Field(default=None, max_length=256)
+    limits: TenantLimits | None = None
+    # Per-tenant Squid allowlist. Slice-12 ACCEPTS the field but does
+    # NOT enforce it yet — Squid's runtime allowlist injection is a
+    # follow-up. Stored verbatim for now so operators can pre-populate.
+    egress_allowlist: list[str] | None = None
+
+
+class UpdateTenantRequest(BaseModel):
+    display_name: str | None = Field(default=None, max_length=256)
+    limits: TenantLimits | None = None
+    egress_allowlist: list[str] | None = None
+
+
+class TenantResponse(BaseModel):
+    tenant_id: str
+    display_name: str
+    created_at: int
+    limits: TenantLimits
+    egress_allowlist: list[str] | None
+    active_token_count: int
+
+
+class TenantListResponse(BaseModel):
+    entries: list[TenantResponse]
+
+
+class IssueTokenRequest(BaseModel):
+    scopes: list[Scope] | None = Field(
+        default=None,
+        description=(
+            "Optional list of scopes this token may use. None / omitted "
+            "= grant all scopes (back-compat default). Empty list = "
+            "explicitly no scopes (token can only call routes that "
+            "require no scope, useful for read-only health probes)."
+        ),
+    )
+    note: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Operator-friendly note attached to the token.",
+    )
+
+
+class IssueTokenResponse(BaseModel):
+    token_id: str
+    token: str = Field(
+        description=(
+            "Plaintext bearer token. Saved nowhere by the service; the operator must record it now."
+        ),
+    )
+    tenant_id: str
+    scopes: list[Scope] | None
+    issued_at: int
+
+
+class TokenInfo(BaseModel):
+    token_id: str
+    tenant_id: str
+    scopes: list[Scope] | None
+    issued_at: int
+    revoked_at: int | None
+    note: str | None
+
+
+class TokenListResponse(BaseModel):
+    entries: list[TokenInfo]
+
+
+class TenantUsageResponse(BaseModel):
+    tenant_id: str
+    concurrent_sessions: int
+    max_concurrency: int
+    workspace_bytes: int | None  # None if quota tracking unavailable
+    active_token_count: int
+
+
+class DeleteTenantResponse(BaseModel):
+    tenant_id: str
+    sessions_destroyed: int
+    tokens_revoked: int
+
+
 class RotateTokenResponse(BaseModel):
     token: str = Field(
         description=(

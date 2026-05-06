@@ -121,6 +121,184 @@ effectively root on host already.
 If you can't accept SYS_ADMIN inside any container at all, switch to
 the systemd path.
 
+## Workspace storage — picking a backend
+
+Per-session workspaces (the `/workspace` mount inside each sandbox)
+live under `SANDBOX_VOLUME_BASE` on the host. The default
+(`/var/lib/sandbox-volumes` backed by a 50 GiB loopback XFS image
+on the system disk) is a sensible local-only setup — but if you're
+on a VM, using attached cloud block storage, or want sessions to
+share a network volume, here's how to pick.
+
+### Decision matrix
+
+| Backend | Quota enforced? | Survives host reboot? | Shareable across hosts? | Throughput | Setup |
+|---|---|---|---|---|---|
+| **A. Local XFS loopback** (default) | ✅ XFS prjquota | ✅ | ❌ | Fast (local FS) | `setup-host.sh --full --with-xfs-quota` |
+| **B. Local XFS partition** | ✅ XFS prjquota | ✅ | ❌ | Fastest | Mount your XFS partition with `prjquota`, point `SANDBOX_VOLUME_BASE` at it |
+| **C. Cloud block volume (EBS / PD / Azure Disk)** | ✅ if formatted XFS+prjquota | ✅ | ❌ (single-attach) | Fast (~local) | Same as B once attached + mounted |
+| **D. Local NVMe / instance store** (cloud ephemeral) | ✅ if XFS+prjquota | ❌ (gone after stop/restart) | ❌ | Fastest | Same as B; accept ephemerality, document recovery |
+| **E. Network mount (NFS / SMB / EFS / FSx)** | ⚠️ Advisory only | ✅ | ✅ | Slower (network RTT × small-file ops) | See "Network-mounted storage" below |
+
+**Most operators want B or C.** They get kernel-enforced quota,
+fast local IO, and the standard backup story (block-level
+snapshots of the underlying disk). The default A is fine for dev
+and small single-host deployments; D for cost-optimised stateless
+batch workloads; E for multi-host scale-out.
+
+### A / B / C / D — local block storage
+
+If you've attached a dedicated block device (cloud volume, second
+local disk, NVMe instance store), the steps are the same regardless
+of provenance:
+
+```bash
+# 1. Format as XFS — preferred for the prjquota support.
+sudo mkfs.xfs /dev/<device>          # e.g. /dev/nvme1n1, /dev/sdb1, /dev/disk/azure/scsi1/lun0
+
+# 2. Mount with prjquota; persist in /etc/fstab.
+sudo mkdir -p /data/sandbox-volumes
+UUID=$(sudo blkid -s UUID -o value /dev/<device>)
+echo "UUID=$UUID /data/sandbox-volumes xfs prjquota,defaults 0 2" \
+    | sudo tee -a /etc/fstab
+sudo mount /data/sandbox-volumes
+
+# 3. Point SANDBOX_VOLUME_BASE at the new mount.
+echo 'SANDBOX_VOLUME_BASE=/data/sandbox-volumes' | sudo tee -a /etc/sandbox/env
+
+# 4. Run setup-host.sh WITHOUT --with-xfs-quota (your mount is the
+#    XFS already; the loopback is unnecessary).
+sudo deploy/setup-host.sh --full
+
+# 5. Bring up the stack.
+docker compose --env-file /etc/sandbox/env up -d
+```
+
+**Cloud-specific notes:**
+
+- **AWS EBS** — gp3 / io2 are good defaults. Mount via the
+  device-symlink form (`/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_*`)
+  to survive controller-letter shuffling.
+- **GCP Persistent Disk** — `/dev/disk/by-id/google-<disk-name>` is
+  the stable name.
+- **Azure managed disk** — `/dev/disk/azure/scsi1/lun*` is stable
+  across reboots.
+- **AWS local NVMe instance store / GCP local SSD / Azure
+  ephemeral OS disk (D)** — these are *erased* on stop/start.
+  Acceptable if your sessions are short-lived and you don't care
+  about persistence; otherwise you'll lose all workspaces on the
+  next instance lifecycle event. Combine with the slice-6a startup
+  reconciliation: orphaned sessions get marked `STOPPED` rather
+  than crashing the next exec.
+
+### E — Network-mounted storage (NFS / SMB / EFS / FSx)
+
+When you want sessions to share a workspace pool across hosts,
+or you're using cloud-managed network storage, mount it once on
+the host and point `SANDBOX_VOLUME_BASE` at a subdirectory.
+
+**Trade-offs vs. local block:**
+
+- ⚠️ **No XFS prjquota** — most network filesystems can't enforce
+  per-directory size limits. The `Limits.workspace_mib` becomes
+  advisory; nothing stops a session from filling the share.
+- ⚠️ **chown semantics vary** — SMB/CIFS often rejects `chown`
+  unless mounted with forced UIDs. NFSv4 with idmapping usually
+  works. The control plane handles this if you set
+  `SANDBOX_BIND_VOLUME_UID` correctly (or leave it unset for the
+  0777 fallback).
+- ⚠️ **Network RTT** on every fs op — `npm install` / `git
+  clone` of large monorepos will be 5–20× slower than local disk.
+- ✅ **Multi-host scale-out** — the same workspace dir can be
+  mounted on multiple control-plane hosts; see slice 10 plan
+  notes for the routing concerns this enables.
+
+**SMB / CIFS quick recipe** (the case the user example covered):
+
+```bash
+# 1. Create credentials file (lock down to root).
+sudo tee /etc/cifs.creds >/dev/null <<EOF
+username=YOUR_SMB_USER
+password=YOUR_SMB_PASSWORD
+EOF
+sudo chown root:root /etc/cifs.creds && sudo chmod 0600 /etc/cifs.creds
+
+# 2. Compute the dockremap UID once — used both in fstab and env.
+DOCKREMAP_UID=$(awk -F: '$1=="dockremap"{print $2 + 10000}' /etc/subuid)
+echo "use uid=$DOCKREMAP_UID in fstab"
+
+# 3. Add to /etc/fstab. The forceuid/forcegid quartet makes every
+#    file appear as the dockremap UID so the control plane's chown
+#    is a no-op.
+sudo tee -a /etc/fstab >/dev/null <<EOF
+//smb-server/share /mnt/shared cifs credentials=/etc/cifs.creds,uid=$DOCKREMAP_UID,gid=$DOCKREMAP_UID,forceuid,forcegid,_netdev,vers=3.0 0 0
+EOF
+sudo mount -a
+
+# 4. Create the subdirectory you want to use as the volume base.
+sudo install -d -m 0755 -o root -g root /mnt/shared/data
+
+# 5. Configure /etc/sandbox/env.
+sudo tee -a /etc/sandbox/env >/dev/null <<EOF
+
+SANDBOX_VOLUME_BASE=/mnt/shared/data
+SANDBOX_BIND_VOLUME_UID=$DOCKREMAP_UID
+EOF
+sudo chmod 0640 /etc/sandbox/env
+
+# 6. Setup + up. NO --with-xfs-quota.
+sudo deploy/setup-host.sh --full
+docker compose --env-file /etc/sandbox/env up -d
+```
+
+**NFS quick recipe:**
+
+```ini
+# /etc/fstab — NFSv4 with idmapping.
+nfs-server:/share  /mnt/shared  nfs4  rw,_netdev,nfsvers=4.2,noatime  0  0
+```
+
+NFS preserves POSIX UIDs natively (no `forceuid` needed) provided
+the dockremap UID exists on the NFS server side too — usually
+arranged via NFSv4 ID mapping (`idmapd`) or by ensuring the same
+numeric UID exists on both ends. If the NFS server has no
+matching UID, files appear as `nobody`; the control plane's
+chown will fail. Workaround: leave `SANDBOX_BIND_VOLUME_UID`
+unset and accept the 0777 fallback.
+
+**Cloud-managed network storage:**
+
+- **AWS EFS** — mount via NFS; `regional` or `one-zone` storage
+  classes both work. Set `nfsvers=4.1` for the AWS docs default.
+- **AWS FSx for Lustre / FSx for OpenZFS** — Lustre is fastest
+  for bulk IO but has its own quota story; ZFS exposes
+  per-directory quotas via `zfs set quota=`.
+- **Azure Files** — SMB; same recipe as above.
+- **GCP Filestore** — NFSv3/v4; same recipe with `nfsvers`
+  adjusted.
+
+### Picking-by-use-case cheat sheet
+
+- **Single-host dev, throw-away sessions** → A (default).
+- **Single-host prod, persistent sessions** → B or C.
+- **Cloud spot/preemptible workers, batch agents** → D.
+- **Multi-host control planes, shared workspace pool** → E
+  (with the advisory-quota caveat noted).
+- **Hybrid (per-tenant choice)** → not supported in v1; one
+  `SANDBOX_VOLUME_BASE` per host. Per-tenant routing to different
+  storage is on the v1.2+ track.
+
+### Footgun: pick the path BEFORE the first session
+
+Whichever backend you pick, lock the path in before any session
+exists. Docker volumes bake the absolute bind path into their
+metadata at create time; changing `SANDBOX_VOLUME_BASE` after
+sessions exist orphans them — their volumes still reference the
+old path, so resume / exec on those sessions fails until you
+recreate the volumes. See "Customize the workspace volume path"
+below for the lossy migration recipe if you have to switch on a
+running host.
+
 ## Operations
 
 ### Customize the workspace volume path

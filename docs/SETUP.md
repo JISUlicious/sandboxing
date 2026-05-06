@@ -288,6 +288,10 @@ SANDBOX_QUOTA_VOLUME_BASE=/var/lib/sandbox-volumes
 # compute manually with:
 #   awk -F: '$1=="dockremap"{print $2 + 10000}' /etc/subuid
 SANDBOX_BIND_VOLUME_UID=110001
+# Slice 12 — optional admin token for the tenant-management API.
+# Single-tenant deployments don't need this; admin endpoints return
+# 503 admin_disabled when unset. Generate with `openssl rand -hex 32`.
+# SANDBOX_ADMIN_TOKEN=<32-byte random; openssl rand -hex 32>
 # SANDBOX_DEV_MODE intentionally absent — production posture.
 ```
 
@@ -314,6 +318,43 @@ curl -X POST -H "Authorization: Bearer $OLD_TOKEN" \
 
 Both old and new tokens authenticate during the 5-minute grace
 window. After that the old token returns 401.
+
+**Tenant management API (slice 12).** Setting `SANDBOX_ADMIN_TOKEN`
+unlocks the admin surface under `/v1/tenants/*`: create / list /
+update / delete tenants, issue scoped tokens, read per-tenant usage.
+Endpoints return `503 admin_disabled` when the env var is unset.
+Issuing a scoped token from the admin token:
+
+```bash
+ADMIN=$(sudo grep ADMIN_TOKEN /etc/sandbox/env | cut -d= -f2)
+curl -sS -X POST -H "Authorization: Bearer $ADMIN" \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"acme","limits":{"max_concurrency":10}}' \
+    http://127.0.0.1:8000/v1/tenants
+
+curl -sS -X POST -H "Authorization: Bearer $ADMIN" \
+    -H 'Content-Type: application/json' \
+    -d '{"scopes":["exec","file_read"]}' \
+    http://127.0.0.1:8000/v1/tenants/acme/tokens
+# Returns the new token plaintext + token_id; save the plaintext.
+```
+
+Available scopes: `session_create`, `session_destroy`, `exec`,
+`file_read`, `file_write`, `file_delete`, `processes` (umbrella),
+`tokens_rotate`. Tokens issued without an explicit `scopes` list
+get all scopes (back-compat for single-token deployments).
+
+**Background processes (slice 11).** `POST /v1/sessions/{id}/processes`
+starts a long-running command that survives across exec calls;
+`GET /processes/{pid}/logs` is an SSE tail of merged stdout+stderr.
+Useful for `npm run dev`, training jobs, browser drivers — see
+SPECIFICATION.md and the OpenAPI schema at `/docs`.
+
+**Idempotency** (slice 11a). Mutating endpoints honor an
+`Idempotency-Key: <uuid>` header; replays return the cached
+response for 24 h (configurable via `SANDBOX_IDEMPOTENCY_TTL_S`).
+Cache scope is per-tenant; the same key under two tenants is two
+separate operations.
 
 **About `SANDBOX_TOKEN_PEPPER`:** it's HMAC'd with each bearer token
 to produce the hash stored in the `tokens` table — so the database

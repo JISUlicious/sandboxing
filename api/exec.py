@@ -13,6 +13,7 @@ from typing import Any
 from api import metrics
 from api.audit import AuditEmitter
 from api.docker_client import (
+    OUTPUT_CAP_BYTES,
     TIMEOUT_EXIT_CODE,
     DockerClient,
     _append_capped,
@@ -49,7 +50,7 @@ class ExecService:
 
     async def run(self, session_id: str, tenant_id: str, req: ExecRequest) -> ExecResponse:
         self.audit.precheck()
-        session = await self._prepare(session_id, tenant_id, req)
+        session, resume_ms = await self._prepare(session_id, tenant_id, req)
         timeout_s = self._effective_timeout(req, session)
         env = req.env or {}
         stdin_bytes = self._encode_stdin(req)
@@ -92,6 +93,8 @@ class ExecService:
             effective_timeout_s=timeout_s,
             truncated=bool(out.truncated_streams),
             truncated_streams=out.truncated_streams,
+            effective_truncation_cap_bytes=OUTPUT_CAP_BYTES,
+            resume_latency_ms=resume_ms,
         )
 
     # ----- streaming (SPEC-202) -----
@@ -115,7 +118,7 @@ class ExecService:
         """
         self.validate_stream_request(req)
         self.audit.precheck()
-        session = await self._prepare(session_id, tenant_id, req)
+        session, resume_ms = await self._prepare(session_id, tenant_id, req)
         timeout_s = self._effective_timeout(req, session)
         env = req.env or {}
         assert session.container_id is not None
@@ -183,6 +186,8 @@ class ExecService:
             effective_timeout_s=timeout_s,
             truncated=bool(truncated),
             truncated_streams=sorted(truncated),
+            effective_truncation_cap_bytes=OUTPUT_CAP_BYTES,
+            resume_latency_ms=resume_ms,
         ).model_dump()
         if timed_out:
             result_payload["error"] = "exec_timeout"
@@ -204,22 +209,29 @@ class ExecService:
 
     # ----- helpers -----
 
-    async def _prepare(self, session_id: str, tenant_id: str, req: ExecRequest) -> SessionRow:
+    async def _prepare(
+        self, session_id: str, tenant_id: str, req: ExecRequest
+    ) -> tuple[SessionRow, int]:
+        """Return (session, resume_latency_ms). resume_latency_ms is 0
+        when the session was already RUNNING."""
         session = await self.registry.get(session_id, tenant_id)
         if session is None:
             raise SessionNotFound()
         self._validate(req)
         if session.status not in ("RUNNING", "IDLE", "STOPPED"):
             raise InvalidState(f"cannot exec on session in status {session.status}")
+        resume_ms = 0
         if session.status in ("STOPPED", "IDLE"):
             assert session.container_id is not None
             start_ns = time.monotonic_ns()
             await asyncio.to_thread(self.docker.start_container, session.container_id)
             await self.registry.transition(session_id, "RUNNING")
-            metrics.resume_seconds.observe((time.monotonic_ns() - start_ns) / 1_000_000_000)
+            resume_ns = time.monotonic_ns() - start_ns
+            metrics.resume_seconds.observe(resume_ns / 1_000_000_000)
+            resume_ms = resume_ns // 1_000_000
             session = await self.registry.get(session_id, tenant_id)
             assert session is not None
-        return session
+        return session, resume_ms
 
     @staticmethod
     def _validate(req: ExecRequest) -> None:

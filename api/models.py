@@ -63,6 +63,16 @@ class ExecResponse(BaseModel):
     effective_timeout_s: int
     truncated: bool = False
     truncated_streams: list[str] = Field(default_factory=list)
+    # Slice 11c — cross-cutting contract sharpening. Lets clients size
+    # buffers without hardcoding the SPEC-203 8 MiB cap.
+    effective_truncation_cap_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        description="Per-stream byte cap used for stdout/stderr truncation.",
+    )
+    # Time spent auto-resuming a STOPPED session before this exec ran;
+    # 0 when the session was already RUNNING. Lets clients tell whether
+    # a slow exec was queue / process work vs. resume.
+    resume_latency_ms: int = Field(default=0, ge=0)
 
 
 # ----- files (SPEC-107) -----

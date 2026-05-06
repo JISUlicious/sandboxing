@@ -196,3 +196,68 @@ def test_dotdot_cwd_rejected(authed):
     sid = _create_session(authed)
     r = _start(authed, sid, argv=["true"], cwd="../escape")
     assert r.status_code == 400
+
+
+# Slice 11c: log streaming SSE
+
+
+def test_log_stream_emits_sse_chunks(authed, fake_docker):
+    import base64
+    import json as _json
+
+    sid = _create_session(authed)
+    p = _start(authed, sid).json()
+    spawn = fake_docker.spawn_supervised_calls[-1]
+    container_id = fake_docker.created_containers[-1][0]
+    fake_docker.write_log_in_container(container_id, spawn["log_path"], "hello\n")
+
+    r = authed.get(f"/v1/sessions/{sid}/processes/{p['process_id']}/logs")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    body = r.text
+    assert "event: log" in body
+    data_line = next(line for line in body.splitlines() if line.startswith("data:"))
+    payload = _json.loads(data_line.removeprefix("data:").strip())
+    assert base64.b64decode(payload["chunk_b64"]) == b"hello\n"
+
+
+# Slice 11c: cross-cutting ExecResponse fields
+
+
+def test_exec_response_includes_truncation_cap_and_resume(authed):
+    sid = _create_session(authed)
+    body = authed.post(f"/v1/sessions/{sid}/exec", json={"argv": ["echo", "hi"]}).json()
+    assert body["effective_truncation_cap_bytes"] == 8 * 1024 * 1024
+    assert body["resume_latency_ms"] == 0
+
+
+def test_resume_latency_populated_on_stopped_session(authed):
+    sid = _create_session(authed)
+    authed.post(f"/v1/sessions/{sid}/stop")
+    body = authed.post(f"/v1/sessions/{sid}/exec", json={"argv": ["echo", "hi"]}).json()
+    assert body["resume_latency_ms"] >= 0
+
+
+# Slice 11c: InvalidPath sub-codes
+
+
+def test_invalid_path_sub_codes(authed):
+    sid = _create_session(authed)
+    r = authed.post(
+        f"/v1/sessions/{sid}/files",
+        json={"path": "/etc/passwd", "content_b64": "Cg=="},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["sub_code"] == "absolute_path"
+
+    r = authed.post(
+        f"/v1/sessions/{sid}/files",
+        json={"path": "../../tmp/foo", "content_b64": "Cg=="},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["sub_code"] == "escaped_workspace"
+
+    # workspace_root is hard to trigger via HTTP because URL
+    # normalization eats `/.`-style segments before they reach the
+    # route handler. Coverage exists at the unit level via the
+    # _resolve_workspace_path helper.

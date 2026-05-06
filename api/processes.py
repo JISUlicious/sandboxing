@@ -190,6 +190,39 @@ class ProcessService:
         await self._registry.delete_process(session_id=session_id, process_id=process_id)
         return snapshot
 
+    async def tail_logs(
+        self,
+        *,
+        session_id: str,
+        tenant_id: str,
+        process_id: str,
+        lines: int = 100,
+    ) -> tuple[str, bool]:
+        """Return (text, truncated_to_cap) for the last `lines` lines
+        of the process's merged stdout+stderr log. Used by the
+        non-streaming MCP `process_logs` tool."""
+        session = await self._sessions.get(session_id, tenant_id)
+        row = await self._registry.get_process(
+            session_id=session_id, process_id=process_id, tenant_id=tenant_id
+        )
+        if row is None:
+            raise InvalidArgument(f"process_id {process_id} not found in session")
+        if session.container_id is None:
+            return "", False
+        return await asyncio.to_thread(
+            self._docker.tail_text_in_container,
+            session.container_id,
+            row.log_path,
+            lines=lines,
+        )
+
+    def stream_log_iter(self, session, log_path: str):
+        """Sync generator yielding raw log chunks. Wrapped by the SSE
+        route handler with `asyncio.to_thread`-style bridging. Returns
+        the underlying iterator the route can iterate over with
+        cancellation propagation."""
+        return self._docker.stream_log_lines(session.container_id, log_path)
+
     async def reap_session_processes(self, session: object) -> int:
         """Called from `SessionService._destroy_locked` before container
         removal. SIGKILLs every RUNNING process owned by the session.

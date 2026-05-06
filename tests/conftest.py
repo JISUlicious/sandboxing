@@ -270,6 +270,30 @@ class FakeDockerClient:
             return None
         return data.decode("utf-8", errors="replace")
 
+    def tail_text_in_container(
+        self, container_id: str, abs_path: str, *, lines: int
+    ) -> tuple[str, bool]:
+        data = self._fs.get((container_id, abs_path))
+        if data is None:
+            return "", False
+        text = data.decode("utf-8", errors="replace")
+        last_lines = text.splitlines()[-lines:]
+        return "\n".join(last_lines) + ("\n" if last_lines else ""), False
+
+    def stream_log_lines(self, container_id: str, abs_path: str):
+        data = self._fs.get((container_id, abs_path))
+        if data:
+            yield data
+        # Test simulator stops after the snapshot — production uses
+        # `tail -F` which would keep yielding. Tests can extend the
+        # virtual fs by writing more bytes and re-driving the route.
+
+    def write_log_in_container(self, container_id: str, abs_path: str, text: str) -> None:
+        """Test helper — append to a virtual log file so MCP / SSE
+        log endpoints have something to read."""
+        existing = self._fs.get((container_id, abs_path), b"")
+        self._fs[(container_id, abs_path)] = existing + text.encode("utf-8")
+
     def simulate_process_exit(self, ospid: int, exit_code: int = 0) -> None:
         """Test helper — flip a tracked process to EXITED with the
         given exit code, including writing the exit file the way the

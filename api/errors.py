@@ -40,8 +40,27 @@ class ExecTimeout(SandboxError):
 
 
 class InvalidPath(SandboxError):
-    def __init__(self, message: str = "path is not within /workspace") -> None:
+    """Slice 11c: optional `sub_code` distinguishes the failure mode so
+    clients can render specific error messages without parsing
+    `message`. Sub-codes:
+      - `null_or_required` — path missing or contained NUL.
+      - `absolute_path` — path started with `/`.
+      - `escaped_workspace` — path used `..` to leave /workspace.
+      - `workspace_root` — path resolved to /workspace itself.
+    Setting `code` overall stays `invalid_path` for back-compat;
+    `sub_code` lives in `detail`.
+    """
+
+    def __init__(
+        self,
+        message: str = "path is not within /workspace",
+        *,
+        sub_code: str | None = None,
+    ) -> None:
         super().__init__(400, "invalid_path", message)
+        if sub_code is not None:
+            assert isinstance(self.detail, dict)
+            self.detail["sub_code"] = sub_code
 
 
 class AuditUnhealthy(SandboxError):

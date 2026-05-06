@@ -569,6 +569,42 @@ class DockerClient:
             return None
         return out.decode("utf-8", errors="replace")
 
+    def tail_text_in_container(
+        self, container_id: str, abs_path: str, *, lines: int
+    ) -> tuple[str, bool]:
+        """Return `(text, truncated)` for the last `lines` lines of a
+        file inside the container. `truncated` is True iff the captured
+        bytes exceed OUTPUT_CAP_BYTES (the SPEC-203 stream cap)."""
+        out, _, rc = self._exec_simple(
+            container_id, ["/usr/bin/tail", "-n", str(lines), "--", abs_path]
+        )
+        if rc != 0:
+            return "", False
+        truncated = len(out) > OUTPUT_CAP_BYTES
+        if truncated:
+            out = out[-OUTPUT_CAP_BYTES:]
+        return out.decode("utf-8", errors="replace"), truncated
+
+    def stream_log_lines(self, container_id: str, abs_path: str) -> Iterator[bytes]:
+        """`tail -F` the file inside the container, yielding raw chunks
+        as they appear. Iteration stops when the caller drops the
+        generator — the docker exec is killed by docker on the inner
+        side once the API handle goes away. Used by the slice-11c SSE
+        log-stream endpoint."""
+        api = self.client.api
+        exec_id = api.exec_create(
+            container_id,
+            cmd=["/usr/bin/tail", "-n", "+1", "-F", "--", abs_path],
+            stdout=True,
+            stderr=False,
+            user="10001:10001",
+            workdir="/workspace",
+        )["Id"]
+        stream = api.exec_start(exec_id, detach=False, stream=True, demux=False)
+        for chunk in stream:
+            if chunk:
+                yield chunk
+
     # ----- files (slice 2) -----
 
     def put_archive_file(

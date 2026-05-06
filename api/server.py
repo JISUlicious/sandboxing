@@ -8,6 +8,7 @@ schema is served at `/openapi.json`; Swagger UI at `/docs`; ReDoc at
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -200,6 +201,7 @@ def create_app(
         sessions=service_,
         exec_service=exec_service_,
         file_service=file_service_,
+        process_service=process_service_,
     )
 
     @asynccontextmanager
@@ -750,6 +752,60 @@ def create_app(
         return await process_service_.delete(
             session_id=session_id, tenant_id=tenant_id, process_id=process_id
         )
+
+    @app.get(
+        "/v1/sessions/{session_id}/processes/{process_id}/logs",
+        tags=["Processes"],
+        summary="Tail a process's combined stdout+stderr log over SSE",
+        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
+    )
+    async def stream_process_logs(
+        session_id: str, process_id: str, tenant_id: str = Depends(auth)
+    ) -> StreamingResponse:
+        # Validate the (session, process) pair before opening the SSE
+        # body so 404 / 400 is a plain HTTP error, not a half-flushed
+        # stream.
+        session_row = await service_.get(session_id, tenant_id)
+        proc_row = await service_.registry.get_process(
+            session_id=session_id, process_id=process_id, tenant_id=tenant_id
+        )
+        if proc_row is None:
+            from api.errors import InvalidArgument as _InvalidArgument
+
+            raise _InvalidArgument(f"process_id {process_id} not found in session")
+
+        async def event_iter() -> AsyncIterator[bytes]:
+            # Bridge the sync docker-py iterator into asyncio via a
+            # thread + Queue (same pattern exec/stream uses).
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+            SENTINEL = None
+
+            def producer() -> None:
+                try:
+                    for chunk in process_service_.stream_log_iter(session_row, proc_row.log_path):
+                        asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("log stream producer crashed: %s", exc)
+                finally:
+                    asyncio.run_coroutine_threadsafe(queue.put(SENTINEL), loop)
+
+            import threading as _threading
+
+            _threading.Thread(target=producer, daemon=True).start()
+            while True:
+                chunk = await queue.get()
+                if chunk is SENTINEL:
+                    break
+                # Frame as one SSE 'log' event per chunk; data is the
+                # raw bytes base64-encoded so binary log content (ANSI
+                # escapes etc.) round-trips cleanly.
+                import base64 as _base64
+
+                payload = json.dumps({"chunk_b64": _base64.b64encode(chunk).decode()})
+                yield f"event: log\ndata: {payload}\n\n".encode()
+
+        return StreamingResponse(event_iter(), media_type="text/event-stream")
 
     # MCP Streamable HTTP endpoint at /mcp. Mounted LAST so all
     # explicit FastAPI routes above (incl. /healthz, /readyz,

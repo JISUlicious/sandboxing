@@ -116,8 +116,20 @@
             "title": "Effective Timeout S",
             "type": "integer"
           },
+          "effective_truncation_cap_bytes": {
+            "default": 8388608,
+            "description": "Per-stream byte cap used for stdout/stderr truncation.",
+            "title": "Effective Truncation Cap Bytes",
+            "type": "integer"
+          },
           "exit_code": {
             "title": "Exit Code",
+            "type": "integer"
+          },
+          "resume_latency_ms": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Resume Latency Ms",
             "type": "integer"
           },
           "stderr": {
@@ -1863,6 +1875,101 @@
           }
         },
         "summary": "Get one process",
+        "tags": [
+          "Processes"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/processes/{process_id}/logs": {
+      "get": {
+        "operationId": "stream_process_logs_v1_sessions__session_id__processes__process_id__logs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "process_id",
+            "required": true,
+            "schema": {
+              "title": "Process Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Tail a process's combined stdout+stderr log over SSE",
         "tags": [
           "Processes"
         ]

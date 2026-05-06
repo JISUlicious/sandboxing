@@ -38,16 +38,19 @@ def resolve_workspace_path(rel: str, *, allow_workspace_root: bool = False) -> s
     - paths containing NUL bytes
     """
     if not rel or "\x00" in rel:
-        raise InvalidPath("path is required and must not contain NUL")
+        raise InvalidPath(
+            "path is required and must not contain NUL",
+            sub_code="null_or_required",
+        )
     if rel.startswith("/"):
-        raise InvalidPath("path must be relative to /workspace")
+        raise InvalidPath("path must be relative to /workspace", sub_code="absolute_path")
     abs_path = posixpath.normpath(posixpath.join(WORKSPACE, rel))
     if abs_path == WORKSPACE:
         if allow_workspace_root:
             return abs_path
-        raise InvalidPath("path may not refer to /workspace itself")
+        raise InvalidPath("path may not refer to /workspace itself", sub_code="workspace_root")
     if not abs_path.startswith(WORKSPACE + "/"):
-        raise InvalidPath("path escapes /workspace")
+        raise InvalidPath("path escapes /workspace", sub_code="escaped_workspace")
     return abs_path
 
 

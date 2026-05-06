@@ -24,6 +24,12 @@ EXPECTED_TOOLS = {
     "file_read",
     "file_list",
     "file_delete",
+    # Slice 11c — background-process MCP tools.
+    "process_start",
+    "process_list",
+    "process_get",
+    "process_logs",
+    "process_stop",
 }
 
 MCP_HEADERS = {

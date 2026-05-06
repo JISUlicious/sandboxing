@@ -33,8 +33,12 @@ from api.models import (
     FileListResponse,
     FileWriteRequest,
     Limits,
+    ProcessListResponse,
+    ProcessResponse,
     SessionResponse,
+    StartProcessRequest,
 )
+from api.processes import ProcessService
 from api.registry import SessionRow
 from api.sessions import SessionService
 
@@ -125,6 +129,7 @@ def build_mcp(
     sessions: SessionService,
     exec_service: ExecService,
     file_service: FileService,
+    process_service: ProcessService,
 ) -> FastMCP:
     """Construct the FastMCP server with the v1 tool catalogue
     registered as closures over the live service instances.
@@ -301,6 +306,92 @@ def build_mcp(
         except SandboxError as exc:
             raise _surface_error(exc) from exc
         return {"ok": True}
+
+    # ----- background processes (5 tools, slice 11c) -----
+
+    @mcp.tool(
+        name="process_start",
+        description=(
+            "Start a long-running background process inside a session "
+            "(dev server, watcher, training job). Returns immediately "
+            "with a process_id; use process_list / process_get to "
+            "observe state, process_stop to terminate. Survives across "
+            "exec calls. Auto-resumes STOPPED sessions."
+        ),
+    )
+    async def process_start(session_id: str, req: StartProcessRequest) -> ProcessResponse:
+        try:
+            return await process_service.start(
+                session_id=session_id, tenant_id=_tenant_id(), req=req
+            )
+        except SandboxError as exc:
+            raise _surface_error(exc) from exc
+
+    @mcp.tool(
+        name="process_list",
+        description="List background processes in a session (RUNNING + EXITED).",
+    )
+    async def process_list(session_id: str) -> ProcessListResponse:
+        try:
+            entries = await process_service.list(session_id=session_id, tenant_id=_tenant_id())
+        except SandboxError as exc:
+            raise _surface_error(exc) from exc
+        return ProcessListResponse(entries=entries)
+
+    @mcp.tool(
+        name="process_get",
+        description="Fetch one process's state (refreshes RUNNING → EXITED).",
+    )
+    async def process_get(session_id: str, process_id: str) -> ProcessResponse:
+        try:
+            return await process_service.get(
+                session_id=session_id,
+                tenant_id=_tenant_id(),
+                process_id=process_id,
+            )
+        except SandboxError as exc:
+            raise _surface_error(exc) from exc
+
+    @mcp.tool(
+        name="process_logs",
+        description=(
+            "Read the most-recent N lines of a process's stdout+stderr "
+            "log (merged by the supervisor). Default 100 lines, max "
+            "1000. Streaming logs via MCP requires progress "
+            "notifications (slice 13)."
+        ),
+    )
+    async def process_logs(session_id: str, process_id: str, lines: int = 100) -> dict[str, object]:
+        if lines < 1 or lines > 1000:
+            raise RuntimeError("invalid_argument: lines must be in [1, 1000]")
+        try:
+            text, truncated = await process_service.tail_logs(
+                session_id=session_id,
+                tenant_id=_tenant_id(),
+                process_id=process_id,
+                lines=lines,
+            )
+        except SandboxError as exc:
+            raise _surface_error(exc) from exc
+        return {"text": text, "truncated": truncated, "lines_requested": lines}
+
+    @mcp.tool(
+        name="process_stop",
+        description=(
+            "SIGTERM the process; SIGKILL after a grace window if it's "
+            "still alive. Idempotent on already-EXITED processes. "
+            "Drops the registry row."
+        ),
+    )
+    async def process_stop(session_id: str, process_id: str) -> ProcessResponse:
+        try:
+            return await process_service.delete(
+                session_id=session_id,
+                tenant_id=_tenant_id(),
+                process_id=process_id,
+            )
+        except SandboxError as exc:
+            raise _surface_error(exc) from exc
 
     return mcp
 

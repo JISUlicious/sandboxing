@@ -45,8 +45,13 @@ services:
     volumes:
       # Operator-managed allowlist. Edit + `docker compose restart proxy`.
       - ./proxy/allowed-domains.txt:/etc/squid/allowed-domains.txt:ro
+    # `squid -k check` is Squid's own liveness probe — it reads the
+    # PID file and signals the running daemon, returning 0 iff it
+    # answers. Bundled with the squid package, so no extra deps.
+    # (Earlier versions tried `squidclient mgr:info` but the package
+    # that ships `squidclient` isn't in `debian:stable-slim`.)
     healthcheck:
-      test: ["CMD-SHELL", "squidclient -h 127.0.0.1 mgr:info >/dev/null 2>&1"]
+      test: ["CMD", "squid", "-k", "check"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -111,8 +111,9 @@ def test_create_volume_chowns_bind_when_uid_set(tmp_path):
     def fake_chmod(self, mode):
         chmod_calls.append((str(self), mode))
 
-    with patch("api.docker_client.os.chown", fake_chown), patch.object(
-        type(base), "chmod", fake_chmod
+    with (
+        patch("api.docker_client.os.chown", fake_chown),
+        patch.object(type(base), "chmod", fake_chmod),
     ):
         client.create_volume("vol-x", "session-x", "tenant-x")
 
@@ -135,8 +136,9 @@ def test_create_volume_falls_back_to_0777_when_uid_unset(tmp_path):
     def fake_chmod(self, mode):
         chmod_calls.append((str(self), mode))
 
-    with patch("api.docker_client.os.chown", fake_chown), patch.object(
-        type(base), "chmod", fake_chmod
+    with (
+        patch("api.docker_client.os.chown", fake_chown),
+        patch.object(type(base), "chmod", fake_chmod),
     ):
         client.create_volume("vol-x", "session-x", "tenant-x")
 

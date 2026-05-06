@@ -384,6 +384,32 @@ docker compose --env-file /etc/sandbox/env pull
 docker compose --env-file /etc/sandbox/env up -d
 ```
 
+### `network sandbox_egress was found but has incorrect label`
+
+`docker compose up` complains that a pre-existing `sandbox_egress`
+network is missing its `com.docker.compose.network` label. The
+network is intentionally operator-managed (created by
+`setup-host.sh --full` so the subnet is pinned for the iptables
+rules to target). `compose.yml` declares it `external: true` so
+compose treats it as pre-existing, but older clones may not have
+that declaration:
+
+```bash
+git pull
+docker compose --env-file /etc/sandbox/env up -d
+```
+
+If you'd rather have compose manage the network, drop the existing
+one and the iptables rules referencing it (only safe with the
+stack stopped):
+
+```bash
+docker compose --env-file /etc/sandbox/env down
+docker network rm sandbox_egress
+sudo deploy/setup-host.sh --full           # recreates with the pinned subnet
+docker compose --env-file /etc/sandbox/env up -d
+```
+
 ### `runsc not registered` on session create
 
 `docker info | grep runsc` should list it. If empty, run

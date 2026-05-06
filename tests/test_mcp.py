@@ -221,3 +221,65 @@ async def test_cross_tenant_isolation_via_mcp(authed, client, alice_token):
     assert body["result"].get("isError") is True
     text = body["result"]["content"][0]["text"]
     assert "session_not_found" in text
+
+
+# ---------------------------------------------------------------------
+# Slice 13 — exec streaming via MCP progress notifications
+# ---------------------------------------------------------------------
+
+
+def test_exec_without_progress_token_uses_sync_path(authed):
+    """No progressToken → sync path → one JSON response object,
+    no SSE event framing."""
+    sid = _call_tool(authed, "session_create", {})["structuredContent"]["session_id"]
+    r = _rpc(
+        authed,
+        "tools/call",
+        {
+            "name": "exec",
+            "arguments": {"session_id": sid, "req": {"argv": ["echo", "hi"]}},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "exit_code" in body["result"]["structuredContent"]
+
+
+def test_exec_with_progress_token_uses_streaming_path(authed, fake_docker):
+    """With a progressToken the tool consumes ExecService.run_stream
+    chunk-by-chunk (the streaming path) instead of the sync .run path.
+    Both chunks aggregate into the final stdout — that only happens
+    via run_stream; the sync path would have returned empty stdout
+    from FakeDockerClient.exec_in_container's default.
+
+    Note: `json_response=True` collapses progress notifications into
+    the final JSON tool result rather than emitting them as separate
+    SSE events to a sync TestClient. Operators who need over-the-wire
+    progress notifications drop `json_response=True` from build_mcp;
+    the internal streaming path is what matters for the behavioural
+    difference and is what this test verifies.
+    """
+    fake_docker.stream_exec_scripts.append(
+        [
+            ("stdout", b"first chunk\n"),
+            ("stdout", b"second chunk\n"),
+            ("exit", 0),
+        ]
+    )
+
+    sid = _call_tool(authed, "session_create", {})["structuredContent"]["session_id"]
+    body = {
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "tools/call",
+        "params": {
+            "name": "exec",
+            "arguments": {"session_id": sid, "req": {"argv": ["echo", "hi"]}},
+            "_meta": {"progressToken": "test-progress-1"},
+        },
+    }
+    r = authed.post("/mcp", json=body, headers=MCP_HEADERS)
+    assert r.status_code == 200, r.text
+    payload = r.json()["result"]["structuredContent"]
+    assert payload["stdout"] == "first chunk\nsecond chunk\n"
+    assert payload["exit_code"] == 0

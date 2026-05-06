@@ -93,5 +93,11 @@ class Settings(BaseSettings):
     # is 8; operators raise the per-session field with the clamp here.
     tenant_max_processes: int = 32
 
+    # Slice 12 — admin token for the tenant-management API. Optional;
+    # if unset, /v1/tenants admin endpoints return 503 admin_disabled.
+    # Single-tenant deployments don't need to set this. Generate via:
+    #     openssl rand -hex 32
+    admin_token: str = ""
+
 
 settings = Settings()

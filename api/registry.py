@@ -6,10 +6,15 @@ import json
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
 from api.models import Limits, SessionStatus
+
+# Sentinel for slice-12 update_tenant — distinguishes "don't change"
+# from explicit `None`. Don't expose; only used inside this module.
+_SENTINEL: Any = object()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -26,11 +31,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_tenant_status ON sessions(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_sessions_activity ON sessions(last_activity_at);
 
--- Slice 7 — tenants + tokens (SPEC-405).
+-- Slice 7 — tenants + tokens (SPEC-405). Slice 12 adds limit +
+-- egress_allowlist columns to tenants and scopes / note columns to
+-- tokens. CREATE includes the new columns; existing deployments get
+-- them via the ALTER TABLE migration in `_apply_pending_migrations`.
 CREATE TABLE IF NOT EXISTS tenants (
-    id           TEXT PRIMARY KEY,
-    display_name TEXT NOT NULL,
-    created_at   INTEGER NOT NULL
+    id                  TEXT PRIMARY KEY,
+    display_name        TEXT NOT NULL,
+    created_at          INTEGER NOT NULL,
+    max_concurrency     INTEGER,
+    max_workspace_gib   INTEGER,
+    max_exec_timeout_s  INTEGER,
+    egress_allowlist_json TEXT
 );
 CREATE TABLE IF NOT EXISTS tokens (
     id          TEXT PRIMARY KEY,            -- ulid
@@ -38,6 +50,8 @@ CREATE TABLE IF NOT EXISTS tokens (
     hash        TEXT NOT NULL UNIQUE,        -- HMAC-SHA256(pepper, plaintext) hex
     issued_at   INTEGER NOT NULL,
     revoked_at  INTEGER,                     -- NULL while active; future ts during grace
+    scopes_json TEXT,                        -- NULL = all scopes (back-compat)
+    note        TEXT,
     FOREIGN KEY (tenant_id) REFERENCES tenants(id)
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_tenant ON tokens(tenant_id);
@@ -87,6 +101,29 @@ CREATE TABLE IF NOT EXISTS processes (
 CREATE INDEX IF NOT EXISTS idx_processes_session_state
     ON processes(session_id, state);
 """
+
+# Slice 12 — append-only ALTER TABLE migrations for deployments that
+# already have data in the old (column-less) tenants / tokens tables.
+_PENDING_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("tenants", "max_concurrency", "INTEGER"),
+    ("tenants", "max_workspace_gib", "INTEGER"),
+    ("tenants", "max_exec_timeout_s", "INTEGER"),
+    ("tenants", "egress_allowlist_json", "TEXT"),
+    ("tokens", "scopes_json", "TEXT"),
+    ("tokens", "note", "TEXT"),
+)
+
+
+async def _apply_pending_migrations(db: aiosqlite.Connection) -> None:
+    """Idempotent ALTER TABLE for columns the slice-12 SCHEMA adds."""
+    for table, column, coltype in _PENDING_MIGRATIONS:
+        cur = await db.execute(f"PRAGMA table_info({table})")
+        rows = await cur.fetchall()
+        if any(r[1] == column for r in rows):
+            continue
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+    await db.commit()
+
 
 # Allowed transitions per ARCH §5.
 TRANSITIONS: dict[str, set[str]] = {
@@ -202,6 +239,46 @@ def _row_to_session(row: aiosqlite.Row) -> SessionRow:
     )
 
 
+def _row_to_tenant_dict(row: aiosqlite.Row) -> dict:
+    """Slice 12 — full tenant detail for the management API."""
+    keys = row.keys()
+    allow_json = row["egress_allowlist_json"] if "egress_allowlist_json" in keys else None
+    return {
+        "id": row["id"],
+        "display_name": row["display_name"],
+        "created_at": int(row["created_at"]),
+        "max_concurrency": (
+            int(row["max_concurrency"])
+            if "max_concurrency" in keys and row["max_concurrency"] is not None
+            else None
+        ),
+        "max_workspace_gib": (
+            int(row["max_workspace_gib"])
+            if "max_workspace_gib" in keys and row["max_workspace_gib"] is not None
+            else None
+        ),
+        "max_exec_timeout_s": (
+            int(row["max_exec_timeout_s"])
+            if "max_exec_timeout_s" in keys and row["max_exec_timeout_s"] is not None
+            else None
+        ),
+        "egress_allowlist": json.loads(allow_json) if allow_json else None,
+    }
+
+
+def _row_to_token_info(row: aiosqlite.Row) -> dict:
+    keys = row.keys()
+    scopes_json = row["scopes_json"] if "scopes_json" in keys else None
+    return {
+        "id": row["id"],
+        "tenant_id": row["tenant_id"],
+        "issued_at": int(row["issued_at"]),
+        "revoked_at": int(row["revoked_at"]) if row["revoked_at"] is not None else None,
+        "scopes": json.loads(scopes_json) if scopes_json else None,
+        "note": row["note"] if "note" in keys else None,
+    }
+
+
 class Registry:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
@@ -211,6 +288,10 @@ class Registry:
         async with aiosqlite.connect(self.db_path) as db:
             await db.executescript(SCHEMA)
             await db.commit()
+            # Slice 12: ALTER TABLE for older deployments where the
+            # tenants / tokens tables predate the limit + scopes
+            # columns. Idempotent — does nothing on fresh dbs.
+            await _apply_pending_migrations(db)
 
     async def insert(
         self,
@@ -363,15 +444,39 @@ class Registry:
 
     # ----- tenants + tokens (slice 7) -----
 
-    async def create_tenant(self, tenant_id: str, display_name: str) -> None:
+    async def create_tenant(
+        self,
+        tenant_id: str,
+        display_name: str,
+        *,
+        max_concurrency: int | None = None,
+        max_workspace_gib: int | None = None,
+        max_exec_timeout_s: int | None = None,
+        egress_allowlist: list[str] | None = None,
+    ) -> None:
         """Insert a tenant; idempotent on the primary key (no-op if it
-        already exists). The control plane bootstraps the 'default'
-        tenant on startup from settings.api_token."""
+        already exists). Slice 12 adds optional per-tenant limit
+        columns. The control plane bootstraps the 'default' tenant on
+        startup from settings.api_token; existing rows that pre-date
+        slice 12 carry NULLs for the new columns and inherit the
+        global Settings defaults at runtime."""
         ts = now_ms()
+        allow_json = json.dumps(egress_allowlist) if egress_allowlist is not None else None
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT OR IGNORE INTO tenants (id, display_name, created_at) VALUES (?, ?, ?)",
-                (tenant_id, display_name, ts),
+                "INSERT OR IGNORE INTO tenants "
+                "(id, display_name, created_at, max_concurrency, "
+                " max_workspace_gib, max_exec_timeout_s, egress_allowlist_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    tenant_id,
+                    display_name,
+                    ts,
+                    max_concurrency,
+                    max_workspace_gib,
+                    max_exec_timeout_s,
+                    allow_json,
+                ),
             )
             await db.commit()
 
@@ -391,32 +496,111 @@ class Registry:
             row = await cur.fetchone()
             return int(row["n"]) if row else 0
 
-    async def insert_token(self, *, token_id: str, tenant_id: str, hash_: str) -> None:
+    # Slice 12 — full-detail tenant API.
+
+    async def get_tenant_full(self, tenant_id: str) -> dict | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM tenants WHERE id = ?", (tenant_id,))
+            row = await cur.fetchone()
+            return _row_to_tenant_dict(row) if row else None
+
+    async def list_tenants_full(self) -> Sequence[dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM tenants ORDER BY created_at")
+            rows = await cur.fetchall()
+            return [_row_to_tenant_dict(r) for r in rows]
+
+    async def update_tenant(
+        self,
+        tenant_id: str,
+        *,
+        display_name: str | None = None,
+        max_concurrency: object = _SENTINEL,
+        max_workspace_gib: object = _SENTINEL,
+        max_exec_timeout_s: object = _SENTINEL,
+        egress_allowlist: object = _SENTINEL,
+    ) -> None:
+        """Patch a tenant. Each limit field defaults to `_SENTINEL`
+        (don't touch); explicit `None` clears the field back to the
+        global default."""
+        sets: list[str] = []
+        args: list = []
+        if display_name is not None:
+            sets.append("display_name = ?")
+            args.append(display_name)
+        if max_concurrency is not _SENTINEL:
+            sets.append("max_concurrency = ?")
+            args.append(max_concurrency)
+        if max_workspace_gib is not _SENTINEL:
+            sets.append("max_workspace_gib = ?")
+            args.append(max_workspace_gib)
+        if max_exec_timeout_s is not _SENTINEL:
+            sets.append("max_exec_timeout_s = ?")
+            args.append(max_exec_timeout_s)
+        if egress_allowlist is not _SENTINEL:
+            sets.append("egress_allowlist_json = ?")
+            args.append(json.dumps(egress_allowlist) if egress_allowlist is not None else None)
+        if not sets:
+            return
+        args.append(tenant_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(f"UPDATE tenants SET {', '.join(sets)} WHERE id = ?", args)
+            await db.commit()
+
+    async def delete_tenant(self, tenant_id: str) -> None:
+        """Hard-delete the tenant row. Caller is responsible for
+        revoking tokens / destroying sessions FIRST — this method
+        only drops the tenants row."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM tenants WHERE id = ?", (tenant_id,))
+            await db.commit()
+
+    async def insert_token(
+        self,
+        *,
+        token_id: str,
+        tenant_id: str,
+        hash_: str,
+        scopes: list[str] | None = None,
+        note: str | None = None,
+    ) -> None:
+        """Insert a token row. `scopes=None` ⇒ all-scopes (back-compat);
+        `scopes=[]` ⇒ explicitly no scopes; `scopes=[...]` ⇒ explicit
+        list."""
         ts = now_ms()
+        scopes_json = json.dumps(scopes) if scopes is not None else None
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO tokens (id, tenant_id, hash, issued_at) VALUES (?, ?, ?, ?)",
-                (token_id, tenant_id, hash_, ts),
+                "INSERT INTO tokens (id, tenant_id, hash, issued_at, scopes_json, note) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (token_id, tenant_id, hash_, ts, scopes_json, note),
             )
             await db.commit()
 
-    async def lookup_token(self, hash_: str) -> tuple[str, str, int | None] | None:
-        """Return (token_id, tenant_id, revoked_at) for the row matching
-        `hash_`, or None if no such row. The caller decides whether
-        revoked_at puts the token in grace, fully revoked, or active."""
+    async def lookup_token(
+        self, hash_: str
+    ) -> tuple[str, str, int | None, list[str] | None] | None:
+        """Return (token_id, tenant_id, revoked_at, scopes) for the row
+        matching `hash_`, or None. `scopes` is None when the token has
+        no row in scopes_json (= all-scopes back-compat); a list
+        otherwise."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                "SELECT id, tenant_id, revoked_at FROM tokens WHERE hash = ?",
+                "SELECT id, tenant_id, revoked_at, scopes_json FROM tokens WHERE hash = ?",
                 (hash_,),
             )
             row = await cur.fetchone()
             if row is None:
                 return None
+            scopes_json = row["scopes_json"]
             return (
                 row["id"],
                 row["tenant_id"],
                 int(row["revoked_at"]) if row["revoked_at"] is not None else None,
+                json.loads(scopes_json) if scopes_json else None,
             )
 
     async def revoke_token(self, token_id: str, *, revoke_at_ms: int) -> None:
@@ -428,6 +612,19 @@ class Registry:
                 (revoke_at_ms, token_id),
             )
             await db.commit()
+
+    async def revoke_all_tenant_tokens(self, tenant_id: str) -> int:
+        """Slice 12: bulk-revoke for tenant deletion. Sets revoked_at
+        to now on every active row; returns count revoked."""
+        ts = now_ms()
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "UPDATE tokens SET revoked_at = ? "
+                "WHERE tenant_id = ? AND (revoked_at IS NULL OR revoked_at > ?)",
+                (ts, tenant_id, ts),
+            )
+            await db.commit()
+            return cur.rowcount or 0
 
     async def list_active_tokens(self, tenant_id: str) -> Sequence[tuple[str, int, int | None]]:
         """All tokens for a tenant where revoked_at is NULL or > now.
@@ -449,6 +646,37 @@ class Registry:
                 )
                 for row in rows
             ]
+
+    async def count_active_tokens(self, tenant_id: str) -> int:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT COUNT(*) AS n FROM tokens "
+                "WHERE tenant_id = ? "
+                "AND (revoked_at IS NULL OR revoked_at > ?)",
+                (tenant_id, now_ms()),
+            )
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
+
+    async def list_tokens_full(self, tenant_id: str) -> Sequence[dict]:
+        """Slice 12 — full token detail (including scopes, note) for
+        the management API."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM tokens WHERE tenant_id = ? ORDER BY issued_at",
+                (tenant_id,),
+            )
+            rows = await cur.fetchall()
+            return [_row_to_token_info(r) for r in rows]
+
+    async def get_token_by_id(self, token_id: str) -> dict | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM tokens WHERE id = ?", (token_id,))
+            row = await cur.fetchone()
+            return _row_to_token_info(row) if row else None
 
     # ----- processes (slice 11b) -----
 

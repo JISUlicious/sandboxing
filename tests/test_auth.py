@@ -86,7 +86,7 @@ async def test_old_token_rejected_after_grace_window(client, service, settings):
     digest = hash_token("test-token", settings.token_pepper)
     row = await service.registry.lookup_token(digest)
     assert row is not None
-    token_id, _, _ = row
+    token_id, _, _, _ = row
     past = int(time.time() * 1000) - 1
     await service.registry.revoke_token(token_id, revoke_at_ms=past)
 

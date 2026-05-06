@@ -159,6 +159,66 @@ workspace dir. If you need the old workspace contents, copy them
 into the new dir at `<new-base>/<session-id>/_data/` before the
 control plane creates the replacement volume.
 
+### Multi-tenant management (slice 12)
+
+The `/v1/tenants/*` admin surface is gated by `SANDBOX_ADMIN_TOKEN`.
+Single-tenant deployments leave it unset (admin endpoints return
+`503 admin_disabled`); multi-tenant managed deployments set it once:
+
+```bash
+echo "SANDBOX_ADMIN_TOKEN=$(openssl rand -hex 32)" \
+    | sudo tee -a /etc/sandbox/env
+sudo docker compose --env-file /etc/sandbox/env restart control-plane
+```
+
+The admin token can then create tenants and issue scoped tokens:
+
+```bash
+ADMIN=$(sudo grep ADMIN_TOKEN /etc/sandbox/env | cut -d= -f2)
+api_admin() { curl -sS -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' "$@"; }
+
+# Create a tenant with per-tenant limits.
+api_admin -d '{"name":"acme","limits":{"max_concurrency":10,"max_workspace_gib":50}}' \
+    http://127.0.0.1:8000/v1/tenants
+
+# Issue a scoped token for that tenant (read-only agent, e.g.).
+api_admin -d '{"scopes":["session_create","exec","file_read"],"note":"acme-readonly"}' \
+    http://127.0.0.1:8000/v1/tenants/acme/tokens
+```
+
+Available scopes: `session_create`, `session_destroy`, `exec`,
+`file_read`, `file_write`, `file_delete`, `processes` (umbrella),
+`tokens_rotate`. Tokens issued without an explicit `scopes` list
+get all scopes (back-compat).
+
+**Per-tenant egress allowlist** is a `CreateTenantRequest` field
+today (`egress_allowlist`) but **not yet enforced** — Squid runtime
+allowlist injection is a v1.2 follow-up. Operators can populate the
+field now; the value round-trips through `GET /v1/tenants/{tid}` so
+the data model is forward-compatible.
+
+### Idempotency for retries (slice 11a)
+
+Every mutating route under `/v1/` honors an `Idempotency-Key:
+<uuid>` header. Replays return the cached response for the
+`SANDBOX_IDEMPOTENCY_TTL_S` window (default 24 h). The cache key is
+`(tenant_id, key)` so a key reused under different tenants is two
+separate operations.
+
+```bash
+KEY=$(uuidgen)
+curl -sS -H "Authorization: Bearer $TOKEN" \
+     -H "Idempotency-Key: $KEY" \
+     -d '{}' http://127.0.0.1:8000/v1/sessions
+```
+
+### Background processes (slice 11)
+
+`POST /v1/sessions/{id}/processes` starts a long-running command
+that survives across exec calls (dev servers, watchers, training
+jobs). `GET .../processes/{pid}/logs` is an SSE tail. See the
+OpenAPI schema at `/docs` for the full surface.
+
 ### Upgrades
 
 Releases publish new images at `ghcr.io/JISUlicious/sandbox-{...}:<tag>`

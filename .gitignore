@@ -23,4 +23,10 @@ audit*.log*
 
 .env
 .env.*
+# Re-allow committed example/template env files. The
+# `*.env.example` pattern covers `deploy/.env.compose.example` and
+# any future `.env.<role>.example` files; the bare `.env.example`
+# entry covers a top-level template.
 !.env.example
+!*.env.example
+!.env.*.example

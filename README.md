@@ -163,12 +163,27 @@ Two real-Docker integration tests are gated by
   `GET /v1/sessions/{id}/files/{path}` (read, octet-stream),
   `GET /v1/sessions/{id}/files?dir=...` (list),
   `DELETE /v1/sessions/{id}/files/{path}?recursive=...` (delete)
+- **Processes** (background, slice 11) —
+  `POST /v1/sessions/{id}/processes` (start),
+  `GET /v1/sessions/{id}/processes` (list),
+  `GET /v1/sessions/{id}/processes/{pid}` (one),
+  `GET /v1/sessions/{id}/processes/{pid}/logs` (SSE tail),
+  `DELETE /v1/sessions/{id}/processes/{pid}` (stop+drop). Long-
+  running commands survive across exec calls.
+- **Tenants** — `POST /v1/tenants/me/tokens/rotate` (self-rotate)
+  plus an admin-only management surface under `/v1/tenants/*`
+  (CRUD, scoped tokens, usage). Set `SANDBOX_ADMIN_TOKEN` to
+  enable. SPEC-405 + slice 12.
 - **Operations** — `GET /healthz`, `GET /readyz` (reports
   `{docker, audit}`), `GET /metrics` (Prometheus exposition)
-- **MCP** — `POST /mcp` (Streamable HTTP, bearer-auth) exposes the
-  same surface as 10 Model Context Protocol tools so Claude Code /
-  Desktop / Cursor can drive sandboxes directly. See
-  [docs/MCP.md](./docs/MCP.md).
+- **MCP** — `POST /mcp` (Streamable HTTP, bearer-auth) exposes
+  the same surface as **15 Model Context Protocol tools**
+  (lifecycle / exec / files / processes) so Claude Code /
+  Desktop / Cursor can drive sandboxes directly. The `exec` tool
+  streams stdout/stderr via MCP progress notifications when the
+  client supplies a `progressToken`. See [docs/MCP.md](./docs/MCP.md).
+- **Idempotency** — every mutating route honors an
+  `Idempotency-Key: <uuid>` header for safe retries (slice 11a).
 
 OpenAPI / Swagger UI at `/docs`, ReDoc at `/redoc`, machine-readable
 schema at `/openapi.json`.

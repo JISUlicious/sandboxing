@@ -11,9 +11,9 @@ jobs:
     name: lint + unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           version: latest
       - name: Sync deps
@@ -30,8 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint-and-unit
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v8.1.0
         with:
           version: latest
       - name: Sync deps
@@ -46,8 +46,8 @@ jobs:
     # Docker is preinstalled on ubuntu-latest GitHub runners; just
     # confirm the daemon is up before pulling/building.
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v8.1.0
         with:
           version: latest
       - name: Sync deps

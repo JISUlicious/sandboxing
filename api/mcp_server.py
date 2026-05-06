@@ -223,8 +223,7 @@ def build_mcp(
     @mcp.tool(
         name="session_destroy",
         description=(
-            "Permanently delete the session, its container, and its "
-            "/workspace volume. Idempotent."
+            "Permanently delete the session, its container, and its /workspace volume. Idempotent."
         ),
     )
     async def session_destroy(session_id: str) -> dict[str, bool]:
@@ -269,8 +268,7 @@ def build_mcp(
     @mcp.tool(
         name="file_read",
         description=(
-            "Read a file from /workspace. Returns content_b64 (base64) "
-            "and the file mode."
+            "Read a file from /workspace. Returns content_b64 (base64) and the file mode."
         ),
     )
     async def file_read(session_id: str, path: str) -> dict[str, object]:
@@ -297,9 +295,7 @@ def build_mcp(
             "recursive=True to delete a non-empty directory."
         ),
     )
-    async def file_delete(
-        session_id: str, path: str, recursive: bool = False
-    ) -> dict[str, bool]:
+    async def file_delete(session_id: str, path: str, recursive: bool = False) -> dict[str, bool]:
         try:
             await file_service.delete(session_id, _tenant_id(), path, recursive)
         except SandboxError as exc:

@@ -42,6 +42,24 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_tenant ON tokens(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(hash);
+
+-- Slice 11a — Idempotency-Key replay cache. (tenant_id, key) is the
+-- match — the route_template column is recorded so we can return a
+-- 409 if the same key is replayed against a different endpoint
+-- (Stripe-style "key reused for different operation" guard).
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    tenant_id      TEXT NOT NULL,
+    key            TEXT NOT NULL,
+    route_template TEXT NOT NULL,
+    status_code    INTEGER NOT NULL,
+    body_json      TEXT NOT NULL,             -- empty string for 204 no-content
+    content_type   TEXT NOT NULL,
+    created_at     INTEGER NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_idempotency_expires
+    ON idempotency_keys(expires_at);
 """
 
 # Allowed transitions per ARCH §5.
@@ -345,6 +363,78 @@ class Registry:
                 )
                 for row in rows
             ]
+
+    # ----- idempotency-keys (slice 11a) -----
+
+    async def lookup_idempotency(
+        self, *, tenant_id: str, key: str
+    ) -> tuple[str, int, str, str] | None:
+        """Return (route_template, status_code, body_json, content_type)
+        for an unexpired entry matching (tenant_id, key), or None.
+        Expired rows are treated as absent and the caller should
+        overwrite them via `store_idempotency`."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT route_template, status_code, body_json, content_type "
+                "FROM idempotency_keys "
+                "WHERE tenant_id = ? AND key = ? AND expires_at > ?",
+                (tenant_id, key, now_ms()),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            return (
+                row["route_template"],
+                int(row["status_code"]),
+                row["body_json"],
+                row["content_type"],
+            )
+
+    async def store_idempotency(
+        self,
+        *,
+        tenant_id: str,
+        key: str,
+        route_template: str,
+        status_code: int,
+        body_json: str,
+        content_type: str,
+        ttl_s: int,
+    ) -> None:
+        """INSERT-OR-REPLACE the cache row. Replace lets expired entries
+        be overwritten without a separate delete pass."""
+        ts = now_ms()
+        expires = ts + ttl_s * 1000
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO idempotency_keys "
+                "(tenant_id, key, route_template, status_code, body_json, "
+                " content_type, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    tenant_id,
+                    key,
+                    route_template,
+                    status_code,
+                    body_json,
+                    content_type,
+                    ts,
+                    expires,
+                ),
+            )
+            await db.commit()
+
+    async def purge_expired_idempotency(self) -> int:
+        """Sweep expired rows; called from the reaper at its normal tick.
+        Returns the number of rows removed."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "DELETE FROM idempotency_keys WHERE expires_at <= ?",
+                (now_ms(),),
+            )
+            await db.commit()
+            return cur.rowcount or 0
 
     async def transition_orphaned(self, session_id: str) -> None:
         """Force a session to STOPPED regardless of current state, used

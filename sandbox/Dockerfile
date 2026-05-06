@@ -18,6 +18,7 @@ RUN apt-get update \
         curl \
         procps \
         less \
+        tini \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 agent \
@@ -31,4 +32,9 @@ ENV HOME=/workspace USER=agent
 
 # Container is kept alive by the control plane; exec calls run via
 # `docker exec`. The entrypoint must not exit on its own.
-ENTRYPOINT ["/usr/bin/sleep", "infinity"]
+#
+# tini as PID 1 reaps zombie children so the slice-11 background-
+# process feature doesn't leak defunct entries when supervised
+# subprocesses die. tini forwards signals so `docker stop` still
+# tears the container down cleanly.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/sleep", "infinity"]

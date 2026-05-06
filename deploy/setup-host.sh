@@ -418,14 +418,25 @@ if (( CHECK_ONLY )); then
 else
     echo "Done."
     if (( FULL )); then
-        cat <<'NEXT'
+        # The user that invoked sudo, NOT root. We want the
+        # `usermod -aG sandbox` hint to use their actual login.
+        target_user="${SUDO_USER:-$USER}"
+        cat <<NEXT
 
 Next steps:
   sudo cp deploy/.env.compose.example /etc/sandbox/env
   sudoedit /etc/sandbox/env             # set SANDBOX_API_TOKEN + _PEPPER
+  sudo chown root:sandbox /etc/sandbox/env
   sudo chmod 0640 /etc/sandbox/env
-  docker compose up -d
-  curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/healthz
+
+  # Add yourself to the sandbox group so docker compose can read
+  # /etc/sandbox/env without sudo on every invocation.
+  sudo usermod -aG sandbox $target_user
+  newgrp sandbox        # or log out + back in for the group to apply
+
+  docker compose --env-file /etc/sandbox/env up -d
+  TOKEN=\$(grep API_TOKEN /etc/sandbox/env | cut -d= -f2)
+  curl -sS -H "Authorization: Bearer \$TOKEN" http://127.0.0.1:8000/healthz
 NEXT
     else
         echo "Next: sudo systemctl restart sandbox-api"

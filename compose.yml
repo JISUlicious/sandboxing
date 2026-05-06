@@ -18,16 +18,18 @@
 name: sandbox
 
 networks:
-  # The bridge sandbox containers attach to. Pinned subnet so the
-  # iptables rules in deploy/iptables-setup.sh have a stable target.
+  # The bridge sandbox containers attach to. Pre-created by
+  # `deploy/setup-host.sh --full` (section F6) with the subnet pinned
+  # for the iptables rules in deploy/iptables-setup.sh to target.
+  # Marked `external: true` so compose uses the existing network
+  # rather than trying to (re)create + (re)label it. If you skipped
+  # setup-host.sh, create the network manually first:
+  #   docker network create --driver bridge \
+  #     --subnet "${SANDBOX_SUBNET:-172.30.0.0/24}" \
+  #     --label sandbox.managed=true sandbox_egress
   sandbox_egress:
+    external: true
     name: sandbox_egress
-    driver: bridge
-    ipam:
-      config:
-        - subnet: ${SANDBOX_SUBNET:-172.30.0.0/24}
-    labels:
-      sandbox.managed: "true"
 
 services:
   # ---------------------------------------------------------------

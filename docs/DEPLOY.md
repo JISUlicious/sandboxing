@@ -28,6 +28,15 @@ control plane on the host's Docker daemon — they live on the same
 
 ## Quick-start (Ubuntu / Debian)
 
+> **Before you start:** the Quick-start pulls three images from
+> `ghcr.io/jisulicious/sandbox-*`. On a fresh fork those don't exist
+> until you cut a `v*.*.*` tag (see "Cutting your first release"
+> below) — `docker compose up -d` will fail with
+> `Error Head https://ghcr.io/...: denied`. If you'd rather test
+> against locally-built images first, run the three `docker build`
+> commands from the Troubleshooting section's "denied" entry before
+> the `up -d` step.
+
 ```bash
 git clone https://github.com/JISUlicious/sandboxing
 cd sandboxing
@@ -335,6 +344,45 @@ or hit the gitignore bug from before that PR, pull the latest main
 and try again — `git status` will show the file as untracked vs.
 already-tracked depending on which side of the fix your clone is
 on.
+
+### `Error Head https://ghcr.io/v2/.../manifests/latest: denied`
+
+The control-plane / runtime / proxy images don't exist on ghcr.io
+yet — most likely because no `v*.*.*` release has been cut, or the
+packages exist but are private (GHCR's default).
+
+**Quick fix — build locally** (you don't need a release to test):
+
+```bash
+docker build -t ghcr.io/jisulicious/sandbox-runtime:latest sandbox/
+docker build -t ghcr.io/jisulicious/sandbox-proxy:latest   proxy/
+docker build -f Dockerfile.control-plane \
+             -t ghcr.io/jisulicious/sandbox-control-plane:latest .
+docker compose --env-file /etc/sandbox/env up -d
+```
+
+Compose's default `pull_policy=missing` finds the locally-built
+images and skips the pull. Forks publishing under a different
+namespace can override via `SANDBOX_IMAGE_NAMESPACE` in
+`/etc/sandbox/env`.
+
+**Proper fix — cut a release tag**:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The GitHub Actions workflow at `.github/workflows/release.yml`
+builds + pushes the three images on every `v*.*.*` tag. After it
+finishes, flip each package to **public** (one-time UI step) per
+the "Image visibility" section above, then:
+
+```bash
+sudo sed -i 's/^SANDBOX_VERSION=.*/SANDBOX_VERSION=v0.1.0/' /etc/sandbox/env
+docker compose --env-file /etc/sandbox/env pull
+docker compose --env-file /etc/sandbox/env up -d
+```
 
 ### `runsc not registered` on session create
 

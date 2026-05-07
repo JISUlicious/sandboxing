@@ -588,6 +588,52 @@ sudo deploy/setup-host.sh --full           # recreates with the pinned subnet
 docker compose --env-file /etc/sandbox/env up -d
 ```
 
+### `ImageNotFound: ghcr.io/.../sandbox-runtime:<version>` on session create
+
+The control plane is asking the host's docker daemon to create a
+sandbox container from an image the host doesn't have. The
+image-warmer service is supposed to populate the image on `up -d`,
+but it can miss in three cases:
+
+1. **First-ever `up -d` and the GHCR packages are still private** —
+   the warmer's pull returns `denied`. Fix: flip the package
+   visibility to public per "Image visibility" above, then re-run
+   `docker compose --env-file /etc/sandbox/env up -d --force-recreate
+   image-warmer`.
+2. **`SANDBOX_VERSION` was bumped without recreating the warmer**
+   — `compose restart control-plane` doesn't re-run the warmer,
+   which is `restart: on-failure:3` (one-shot on success). Fix:
+   ```
+   docker compose --env-file /etc/sandbox/env up -d --force-recreate
+   ```
+   Force-recreate without a target re-runs the warmer along with
+   any other changed services.
+3. **`docker system prune` removed the runtime image after the
+   warmer succeeded.** Fix: pull manually.
+   ```
+   VERSION=$(awk -F= '/^SANDBOX_VERSION=/{print $2; exit}' /etc/sandbox/env)
+   docker pull ghcr.io/jisulicious/sandbox-runtime:${VERSION:-latest}
+   ```
+
+After fix 2 or 3, retry the session create — no service restart
+needed; the docker daemon's image cache is what the control plane
+queries each time.
+
+### `dependency failed to start: container sandbox-image-warmer`
+
+The image-warmer hit its `on-failure:3` retry cap. Logs say why:
+
+```bash
+docker compose --env-file /etc/sandbox/env logs sandbox-image-warmer
+```
+
+Most common: GHCR auth (private package, expired token, wrong
+namespace). Fix the underlying issue, then:
+
+```bash
+docker compose --env-file /etc/sandbox/env up -d --force-recreate
+```
+
 ### `runsc not registered` on session create
 
 `docker info | grep runsc` should list it. If empty, run

@@ -63,7 +63,10 @@ services:
   image-warmer:
     image: docker:cli
     container_name: sandbox-image-warmer
-    restart: "no"
+    # `on-failure:3` retries transient `docker pull` failures (GHCR
+    # blip, slow auth) up to three times before giving up. Successful
+    # exit (code 0) does NOT restart, so the warmer stays a one-shot.
+    restart: on-failure:3
     entrypoint: ["/bin/sh", "-c"]
     command: |
       docker pull ${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-runtime:${SANDBOX_VERSION:-latest}
@@ -83,9 +86,17 @@ services:
     image: ${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-control-plane:${SANDBOX_VERSION:-latest}
     container_name: sandbox-control-plane
     restart: unless-stopped
+    # Wait for image-warmer to *succeed* (not just start) before
+    # bringing up the control plane. If the warmer fails 3 times
+    # (see its restart: on-failure:3 above), control-plane never
+    # starts — and you get a clear `dependency failed to start`
+    # error instead of the much-later `ImageNotFound` from the
+    # first session create.
     depends_on:
-      - proxy
-      - image-warmer
+      proxy:
+        condition: service_started
+      image-warmer:
+        condition: service_completed_successfully
     env_file:
       - /etc/sandbox/env
     environment:

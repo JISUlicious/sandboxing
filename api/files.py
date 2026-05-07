@@ -83,20 +83,49 @@ class FileService:
         except (ValueError, TypeError) as exc:
             raise InvalidArgument(f"content_b64 is not valid base64: {exc}") from exc
 
+        return await self._write_resolved(
+            session, tenant_id, session_id, abs_path, content, req.mode
+        )
+
+    async def write_raw(
+        self,
+        session_id: str,
+        tenant_id: str,
+        rel_path: str,
+        content: bytes,
+        mode: int,
+    ) -> dict[str, object]:
+        """Path-in-URL counterpart to `write` — accepts raw bytes instead
+        of a base64-encoded JSON body. Mirrors the GET/DELETE shape so
+        the file surface is symmetric REST."""
+        self.audit.precheck()
+        session = await self._require_running(session_id, tenant_id)
+        abs_path = resolve_workspace_path(rel_path)
+        return await self._write_resolved(session, tenant_id, session_id, abs_path, content, mode)
+
+    async def _write_resolved(
+        self,
+        session: _Session,
+        tenant_id: str,
+        session_id: str,
+        abs_path: str,
+        content: bytes,
+        mode: int,
+    ) -> dict[str, object]:
         await asyncio.to_thread(
             self.docker.put_archive_file,
             container_id=session.container_id,
             abs_path=abs_path,
             content=content,
-            mode=req.mode,
+            mode=mode,
         )
         await self.audit.emit(
             kind="session.file.write",
             tenant=tenant_id,
             session=session_id,
-            payload={"path": abs_path, "size": len(content), "mode": req.mode},
+            payload={"path": abs_path, "size": len(content), "mode": mode},
         )
-        return {"path": abs_path, "size": len(content), "mode": req.mode}
+        return {"path": abs_path, "size": len(content), "mode": mode}
 
     async def read(self, session_id: str, tenant_id: str, rel_path: str) -> tuple[bytes, int]:
         session = await self._require_running(session_id, tenant_id)

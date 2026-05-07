@@ -159,7 +159,8 @@ Two real-Docker integration tests are gated by
   `POST /v1/sessions/{id}/{stop,resume}`, `DELETE /v1/sessions/{id}`
 - **Exec** — `POST /v1/sessions/{id}/exec` (sync) and
   `POST /v1/sessions/{id}/exec/stream` (Server-Sent Events)
-- **Files** — `POST /v1/sessions/{id}/files` (write, base64 body),
+- **Files** — `POST /v1/sessions/{id}/files` (write, base64 JSON body),
+  `POST /v1/sessions/{id}/files/{path}` (write, raw octet-stream body),
   `GET /v1/sessions/{id}/files/{path}` (read, octet-stream),
   `GET /v1/sessions/{id}/files?dir=...` (list),
   `DELETE /v1/sessions/{id}/files/{path}?recursive=...` (delete)

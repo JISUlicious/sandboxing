@@ -182,6 +182,20 @@ api -d '{
 
 (`420` = `0o644`; the API takes decimal.)
 
+The same write also has a path-in-URL shape that mirrors `GET` / `DELETE`,
+useful when you have raw bytes in hand and don't want to base64-encode
+them into JSON:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/octet-stream' \
+    --data-binary @/tmp/payload.bin \
+    "$BASE/v1/sessions/$SID/files/sub/dir/file.bin?mode=420"
+# {"path":"/workspace/sub/dir/file.bin","size":...,"mode":420}
+```
+
+Parent directories are created on the fly (`mkdir -p`) for both shapes.
+
 ### 6.2 Read it back (binary-safe, raw bytes out)
 
 ```bash

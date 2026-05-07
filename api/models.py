@@ -23,7 +23,18 @@ class ErrorResponse(BaseModel):
 class Limits(BaseModel):
     vcpu: int = Field(2, ge=1)
     memory_mib: int = Field(2048, ge=64)
-    workspace_mib: int = Field(1024, ge=64)
+    workspace_mib: int = Field(
+        1024,
+        ge=64,
+        description=(
+            "Per-session hard cap on /workspace usage, in MiB. "
+            "Enforced by XFS prjquota when SANDBOX_VOLUME_BASE is on "
+            "an XFS or ext4+prjquota filesystem; advisory on network "
+            "storage. Pair with the coarser tenant-level "
+            "TenantLimits.max_workspace_gib (in GiB) — the two units "
+            "are deliberate."
+        ),
+    )
     pids: int = Field(256, ge=16)
     nofile: int = Field(1024, ge=64)
     exec_timeout_s: int = Field(60, ge=1)
@@ -103,10 +114,13 @@ class FileListResponse(BaseModel):
 
 
 ProcessState = Literal["RUNNING", "EXITED"]
+# Internal-only restart policy. The DB column persists this value;
+# user-facing requests don't carry it because the v1 supervisor only
+# implements `never`. Exposing a Literal-of-one as a request field
+# looked like a closed enum but rejected every other value, which
+# misled the e2e consumer team. `on_failure` / `always` are reserved
+# for a follow-up that grows restart logic on the supervisor.
 RestartPolicy = Literal["never"]
-# `on_failure` / `always` are reserved for a follow-up — slice 11b
-# only ships `never` so the supervisor doesn't grow restart logic on
-# the critical path.
 
 
 class StartProcessRequest(BaseModel):
@@ -121,13 +135,20 @@ class StartProcessRequest(BaseModel):
         default=None,
         description="Working directory inside /workspace. Defaults to /workspace.",
     )
-    restart_policy: RestartPolicy = "never"
 
 
 class ProcessResponse(BaseModel):
     process_id: str
     name: str | None
-    argv: list[str]
+    argv: list[str] = Field(
+        description=(
+            "WARNING: argv is visible to any token holding the "
+            "`processes` scope (via process_list / process_get). "
+            "Pass credentials via `env`, never as positional args. "
+            "Operators handling sensitive workloads should issue "
+            "tokens without `processes` scope."
+        ),
+    )
     state: ProcessState
     exit_code: int | None
     started_at: int
@@ -173,7 +194,16 @@ class TenantLimits(BaseModel):
     defaults. Each field None ⇒ inherit the global default."""
 
     max_concurrency: int | None = Field(default=None, ge=1)
-    max_workspace_gib: int | None = Field(default=None, ge=1)
+    max_workspace_gib: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Tenant-level coarse cap on workspace usage, in GiB. "
+            "Used for policy / governance at the tenant tier. "
+            "Per-session caps live on Limits.workspace_mib (in MiB) "
+            "for finer granularity — the two units are deliberate."
+        ),
+    )
     max_exec_timeout_s: int | None = Field(default=None, ge=1)
 
 

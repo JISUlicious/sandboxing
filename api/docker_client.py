@@ -200,8 +200,24 @@ class DockerClient:
             # 0700 so the workspace is writable to the agent only.
             uid = self._settings.bind_volume_uid
             if uid is not None:
-                os.chown(bind_path, uid, uid)
-                bind_path.chmod(0o700)
+                try:
+                    os.chown(bind_path, uid, uid)
+                    bind_path.chmod(0o700)
+                except OSError as exc:
+                    # SMB without forceuid, NFS without idmapping, and
+                    # FUSE filesystems can refuse chown. Warn loudly,
+                    # fall back to mode 0o777 so the agent (any uid)
+                    # can still write — the operator's storage-mount
+                    # options are the actual fix; see DEPLOY.md
+                    # 'Storage backends'.
+                    log.warning(
+                        "chown(%s, %d) failed (%s); falling back to mode 0o777. "
+                        "Fix the volume mount options if unintended.",
+                        bind_path,
+                        uid,
+                        exc,
+                    )
+                    bind_path.chmod(0o777)
             else:
                 # Dev / non-userns-remap fallback. The lifespan logs a
                 # one-time warning recommending bind_volume_uid.

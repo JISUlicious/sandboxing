@@ -277,6 +277,13 @@ def create_app(
     app.state.mcp = mcp_
     app.state.processes = process_service_
 
+    # Document the Idempotency-Key contract (slice 11a) in OpenAPI.
+    # The middleware honours the header on every mutation under /v1/,
+    # but FastAPI's default schema generator never sees the middleware,
+    # so SDK generators don't know the parameter exists. Inject it
+    # post-hoc.
+    _install_idempotency_openapi(app)
+
     # Slice 8e: TLS-readiness — when running behind a reverse proxy
     # that terminates TLS (Caddy / nginx in deploy/tls/*.example),
     # honor X-Forwarded-{Proto,For,Host}. Off by default so direct
@@ -285,6 +292,45 @@ def create_app(
         from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
         app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+    # Translate docker-py engine errors into structured 503 responses.
+    # Without these handlers, ImageNotFound / APIError surface as plain-
+    # text "500 Internal Server Error" with no parseable body — the
+    # consumer team's e2e flagged this when the runtime image hadn't
+    # been pulled. 503 (vs 500) reflects "the daemon refused us, the
+    # request itself is fine — retry once the image is pulled / the
+    # daemon is healthy".
+    import docker.errors as _docker_errors
+    from fastapi.responses import JSONResponse as _JSONResponse
+
+    @app.exception_handler(_docker_errors.ImageNotFound)
+    async def _image_not_found_handler(_request: Request, exc: _docker_errors.ImageNotFound):
+        log.warning("docker ImageNotFound: %s", exc)
+        return _JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "code": "image_not_found",
+                    "message": str(exc).splitlines()[0] if str(exc) else "image not found",
+                }
+            },
+        )
+
+    # Order matters: ImageNotFound is a subclass of APIError, so its
+    # handler must be registered first. Starlette dispatches the most-
+    # specific match.
+    @app.exception_handler(_docker_errors.APIError)
+    async def _docker_api_error_handler(_request: Request, exc: _docker_errors.APIError):
+        log.warning("docker APIError: %s", exc)
+        return _JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "code": "docker_api_error",
+                    "message": str(exc).splitlines()[0] if str(exc) else "docker daemon error",
+                }
+            },
+        )
 
     # Slice 11a: Idempotency-Key replay cache for mutating routes.
     # Registered AFTER ProxyHeadersMiddleware so the resolved client
@@ -636,6 +682,49 @@ def create_app(
         tenant: str = Depends(require_scope("file_write")),
     ) -> dict[str, object]:
         return await file_service_.write(session_id, tenant, req)
+
+    @app.post(
+        "/v1/sessions/{session_id}/files/{path:path}",
+        status_code=201,
+        tags=["Files"],
+        summary="Write a file (path-in-URL, raw body)",
+        description=(
+            "Writes a single file into `/workspace`. Mirrors the "
+            "`GET /files/{path}` and `DELETE /files/{path}` shapes: "
+            "the path is in the URL and the body is the raw file "
+            "content (`application/octet-stream`). Use this when the "
+            "caller has bytes-in-hand — for base64-encoded JSON, see "
+            "the collection-level `POST /files`. Path validation, "
+            "parent-dir creation, and STOPPED-session resume are "
+            "identical to the JSON variant."
+        ),
+        responses={
+            201: {
+                "description": "File written.",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "path": "/workspace/sub/notes.txt",
+                            "size": 14,
+                            "mode": 420,
+                        }
+                    }
+                },
+            },
+            **ERR_UNAUTHORIZED,
+            **ERR_NOT_FOUND_SESSION,
+            **ERR_BAD_REQUEST,
+        },
+    )
+    async def write_file_raw(
+        session_id: str,
+        path: str,
+        request: Request,
+        mode: int = Query(default=0o640, ge=0, le=0o777),
+        tenant: str = Depends(require_scope("file_write")),
+    ) -> dict[str, object]:
+        body = await request.body()
+        return await file_service_.write_raw(session_id, tenant, path, body, mode)
 
     @app.get(
         "/v1/sessions/{session_id}/files",
@@ -1158,6 +1247,81 @@ def create_app(
     mcp_attach(fastapi_app=app, mcp=mcp_, authn=authn_)
 
     return app
+
+
+_IDEMPOTENT_METHODS = ("post", "put", "patch", "delete")
+
+
+def _install_idempotency_openapi(app: FastAPI) -> None:
+    """Wrap `app.openapi` so the generated schema declares the
+    `Idempotency-Key` request header on every mutating /v1/ route
+    and the `Idempotent-Replay` response header on their 2xx
+    responses. Cached on `app.openapi_schema` after the first call,
+    matching FastAPI's standard pattern."""
+    from fastapi.openapi.utils import get_openapi
+
+    def _augment(schema: dict) -> dict:
+        components = schema.setdefault("components", {})
+        parameters = components.setdefault("parameters", {})
+        parameters.setdefault(
+            "IdempotencyKey",
+            {
+                "name": "Idempotency-Key",
+                "in": "header",
+                "required": False,
+                "description": (
+                    "Optional client-supplied idempotency key. The "
+                    "first mutating request with a given key under "
+                    "the calling tenant runs normally; replays of "
+                    "the same key within the TTL return the cached "
+                    "response verbatim with `Idempotent-Replay: "
+                    "true`. Stripe-style semantics (slice 11a)."
+                ),
+                "schema": {"type": "string", "maxLength": 200},
+            },
+        )
+        replay_header = {
+            "Idempotent-Replay": {
+                "description": (
+                    "Set to `true` when this response was replayed "
+                    "from the idempotency cache rather than freshly "
+                    "computed."
+                ),
+                "schema": {"type": "string", "enum": ["true"]},
+            }
+        }
+        ref = {"$ref": "#/components/parameters/IdempotencyKey"}
+        for path, item in (schema.get("paths") or {}).items():
+            if not path.startswith("/v1/"):
+                continue
+            for method in _IDEMPOTENT_METHODS:
+                op = item.get(method)
+                if not op:
+                    continue
+                op.setdefault("parameters", [])
+                if ref not in op["parameters"]:
+                    op["parameters"].append(ref)
+                for status, resp in (op.get("responses") or {}).items():
+                    if not status.startswith("2"):
+                        continue
+                    headers = resp.setdefault("headers", {})
+                    headers.setdefault("Idempotent-Replay", replay_header["Idempotent-Replay"])
+        return schema
+
+    def custom_openapi() -> dict:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+            tags=app.openapi_tags,
+        )
+        app.openapi_schema = _augment(schema)
+        return app.openapi_schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
 app = create_app()

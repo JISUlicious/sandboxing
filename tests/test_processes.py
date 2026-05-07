@@ -10,7 +10,7 @@ from __future__ import annotations
 
 def _start(authed, sid, **kw):
     body = {"argv": kw.get("argv", ["sleep", "60"])}
-    for f in ("name", "env", "cwd", "restart_policy"):
+    for f in ("name", "env", "cwd"):
         if f in kw:
             body[f] = kw[f]
     r = authed.post(f"/v1/sessions/{sid}/processes", json=body)

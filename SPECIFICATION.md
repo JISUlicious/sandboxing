@@ -104,7 +104,8 @@ identifies a tenant.
 | GET    | `/v1/sessions/{id}`                   | Get status, limits, usage                |
 | POST   | `/v1/sessions/{id}/exec`              | Run command, return on completion        |
 | POST   | `/v1/sessions/{id}/exec/stream`       | Run command, stream via SSE              |
-| POST   | `/v1/sessions/{id}/files`             | Write file (path in body)                |
+| POST   | `/v1/sessions/{id}/files`             | Write file (path in JSON body, base64 content) |
+| POST   | `/v1/sessions/{id}/files/{path}`      | Write file (path in URL, raw octet-stream body) |
 | GET    | `/v1/sessions/{id}/files/{path}`      | Read file                                |
 | GET    | `/v1/sessions/{id}/files?dir=...`     | List directory                           |
 | DELETE | `/v1/sessions/{id}/files/{path}`      | Delete file (`?recursive=true` for dirs) |

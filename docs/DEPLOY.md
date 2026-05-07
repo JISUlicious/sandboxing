@@ -229,16 +229,32 @@ echo "use uid=$DOCKREMAP_UID in fstab"
 
 # 3. Add to /etc/fstab. The forceuid/forcegid quartet makes every
 #    file appear as the dockremap UID so the control plane's chown
-#    is a no-op.
+#    is a no-op AND the agent (UID 10001 → 110001 via userns-remap)
+#    is the actual owner inside the container.
+#
+#    ⚠️  All four flags matter. Without forceuid/forcegid the SMB
+#        server's UIDs leak through and files appear as 'nobody:nogroup'
+#        inside the container — /workspace will look 'rwxr-xr-x' but
+#        the agent won't own it, so mkdir / writes fail. Without
+#        dir_mode=0700 the SMB mount caps every dir mode at the
+#        client default and the control plane's chmod is a no-op.
+#        (The control plane now logs a warning + falls back to mode
+#        0o777 when chown fails — but fixing the mount is the right
+#        long-term answer; the 0o777 fallback is purely a safety net.)
 sudo tee -a /etc/fstab >/dev/null <<EOF
-//smb-server/share /mnt/shared cifs credentials=/etc/cifs.creds,uid=$DOCKREMAP_UID,gid=$DOCKREMAP_UID,forceuid,forcegid,_netdev,vers=3.0 0 0
+//smb-server/share /mnt/shared cifs credentials=/etc/cifs.creds,uid=$DOCKREMAP_UID,gid=$DOCKREMAP_UID,forceuid,forcegid,dir_mode=0700,file_mode=0600,_netdev,vers=3.0 0 0
 EOF
 sudo mount -a
 
-# 4. Create the subdirectory you want to use as the volume base.
+# 4. Verify the mount options actually took effect. Look for
+#    forceuid,forcegid,dir_mode=0700 in the output — Linux silently
+#    drops unknown flags so it pays to confirm.
+mount | grep /mnt/shared
+
+# 5. Create the subdirectory you want to use as the volume base.
 sudo install -d -m 0755 -o root -g root /mnt/shared/data
 
-# 5. Configure /etc/sandbox/env.
+# 6. Configure /etc/sandbox/env.
 sudo tee -a /etc/sandbox/env >/dev/null <<EOF
 
 SANDBOX_VOLUME_BASE=/mnt/shared/data
@@ -246,7 +262,7 @@ SANDBOX_BIND_VOLUME_UID=$DOCKREMAP_UID
 EOF
 sudo chmod 0640 /etc/sandbox/env
 
-# 6. Setup + up. NO --with-xfs-quota.
+# 7. Setup + up. NO --with-xfs-quota.
 sudo deploy/setup-host.sh --full
 docker compose --env-file /etc/sandbox/env up -d
 ```
@@ -380,6 +396,10 @@ api_admin() { curl -sS -H "Authorization: Bearer $ADMIN" -H 'Content-Type: appli
 # Create a tenant with per-tenant limits.
 api_admin -d '{"name":"acme","limits":{"max_concurrency":10,"max_workspace_gib":50}}' \
     http://127.0.0.1:8000/v1/tenants
+# NOTE on units: TenantLimits.max_workspace_gib is in GiB by design
+# (coarse policy cap for tenant-level governance), while per-session
+# Limits.workspace_mib is in MiB (granular hard cap enforced by XFS
+# prjquota). The two units are deliberate, not drift.
 
 # Issue a scoped token for that tenant (read-only agent, e.g.).
 api_admin -d '{"scopes":["session_create","exec","file_read"],"note":"acme-readonly"}' \

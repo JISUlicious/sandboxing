@@ -105,7 +105,7 @@ class ProcessService:
             name=req.name,
             argv=req.argv,
             cwd=req.cwd,
-            restart_policy=req.restart_policy,
+            restart_policy="never",
             ospid=ospid,
             log_path=log_path,
             exit_path=exit_path,

@@ -1,5 +1,17 @@
 {
   "components": {
+    "parameters": {
+      "IdempotencyKey": {
+        "description": "Optional client-supplied idempotency key. The first mutating request with a given key under the calling tenant runs normally; replays of the same key within the TTL return the cached response verbatim with `Idempotent-Replay: true`. Stripe-style semantics (slice 11a).",
+        "in": "header",
+        "name": "Idempotency-Key",
+        "required": false,
+        "schema": {
+          "maxLength": 200,
+          "type": "string"
+        }
+      }
+    },
     "schemas": {
       "CreateSessionRequest": {
         "properties": {
@@ -458,6 +470,7 @@
           },
           "workspace_mib": {
             "default": 1024,
+            "description": "Per-session hard cap on /workspace usage, in MiB. Enforced by XFS prjquota when SANDBOX_VOLUME_BASE is on an XFS or ext4+prjquota filesystem; advisory on network storage. Pair with the coarser tenant-level TenantLimits.max_workspace_gib (in GiB) \u2014 the two units are deliberate.",
             "minimum": 64.0,
             "title": "Workspace Mib",
             "type": "integer"
@@ -485,6 +498,7 @@
       "ProcessResponse": {
         "properties": {
           "argv": {
+            "description": "WARNING: argv is visible to any token holding the `processes` scope (via process_list / process_get). Pass credentials via `env`, never as positional args. Operators handling sensitive workloads should issue tokens without `processes` scope.",
             "items": {
               "type": "string"
             },
@@ -683,12 +697,6 @@
             ],
             "description": "Operator-friendly label for the process. Free-form.",
             "title": "Name"
-          },
-          "restart_policy": {
-            "const": "never",
-            "default": "never",
-            "title": "Restart Policy",
-            "type": "string"
           }
         },
         "required": [
@@ -734,6 +742,7 @@
                 "type": "null"
               }
             ],
+            "description": "Tenant-level coarse cap on workspace usage, in GiB. Used for policy / governance at the tenant tier. Per-session caps live on Limits.workspace_mib (in MiB) for finer granularity \u2014 the two units are deliberate.",
             "title": "Max Workspace Gib"
           }
         },
@@ -1024,6 +1033,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1045,7 +1057,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
             "content": {
@@ -1113,11 +1136,25 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
           "204": {
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
             "content": {
@@ -1261,6 +1298,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1282,7 +1322,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -1380,6 +1431,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1397,7 +1451,18 @@
             "content": {
               "text/event-stream": {}
             },
-            "description": "SSE stream of stdout/stderr/truncated/result events."
+            "description": "SSE stream of stdout/stderr/truncated/result events.",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -1574,6 +1639,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1602,7 +1670,18 @@
                 }
               }
             },
-            "description": "File written."
+            "description": "File written.",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -1701,11 +1780,25 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
           "204": {
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -1852,6 +1945,135 @@
         "tags": [
           "Files"
         ]
+      },
+      "post": {
+        "description": "Writes a single file into `/workspace`. Mirrors the `GET /files/{path}` and `DELETE /files/{path}` shapes: the path is in the URL and the body is the raw file content (`application/octet-stream`). Use this when the caller has bytes-in-hand \u2014 for base64-encoded JSON, see the collection-level `POST /files`. Path validation, parent-dir creation, and STOPPED-session resume are identical to the JSON variant.",
+        "operationId": "write_file_raw_v1_sessions__session_id__files__path__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "default": 416,
+              "maximum": 511,
+              "minimum": 0,
+              "title": "Mode",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "mode": 420,
+                  "path": "/workspace/sub/notes.txt",
+                  "size": 14
+                },
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Write File Raw V1 Sessions  Session Id  Files  Path  Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "File written.",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Write a file (path-in-URL, raw body)",
+        "tags": [
+          "Files"
+        ]
       }
     },
     "/v1/sessions/{session_id}/processes": {
@@ -1958,6 +2180,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -1979,7 +2204,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -2085,6 +2321,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2096,7 +2335,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -2364,6 +2614,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2375,7 +2628,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
             "content": {
@@ -2453,6 +2717,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2464,7 +2731,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
             "content": {
@@ -2589,6 +2867,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -2610,7 +2891,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -2669,6 +2961,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2680,7 +2975,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
             "content": {
@@ -2738,6 +3044,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -2749,7 +3058,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
             "content": {
@@ -2870,6 +3190,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -2891,7 +3214,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -2958,6 +3292,9 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "requestBody": {
@@ -2979,7 +3316,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -3055,11 +3403,25 @@
               ],
               "title": "Authorization"
             }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
           "204": {
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "Idempotent-Replay": {
+                "description": "Set to `true` when this response was replayed from the idempotency cache rather than freshly computed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
             "content": {

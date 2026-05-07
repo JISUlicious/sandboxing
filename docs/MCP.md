@@ -24,7 +24,7 @@ for remote access.
 
 ## Tool catalogue (v1)
 
-All 10 tools are thin wrappers over the existing service layer.
+All 15 tools are thin wrappers over the existing service layer.
 Schemas come straight from the same Pydantic types the HTTP API
 uses, so MCP and HTTP behave identically.
 
@@ -91,10 +91,26 @@ feature flag at the call site.
 | `file_list` | `session_id: str, subdir: str = ""` | `FileListResponse` | |
 | `file_delete` | `session_id: str, path: str, recursive: bool = False` | `{ok: true}` | |
 
-`Limits`, `ExecRequest`, `ExecResponse`, `FileWriteRequest`, and
-`FileListResponse` are the same Pydantic models the HTTP API uses;
-their schemas appear in the MCP tool definitions verbatim and in
-`/openapi.json`.
+### Background processes
+
+| Tool | Inputs | Returns | Notes |
+|---|---|---|---|
+| `process_start` | `session_id: str, req: StartProcessRequest` | `ProcessResponse` | Long-lived bg process. Auto-resumes STOPPED sessions. |
+| `process_list` | `session_id: str` | `ProcessListResponse` | RUNNING + EXITED. |
+| `process_get` | `session_id: str, process_id: str` | `ProcessResponse` | Refreshes RUNNING → EXITED if the OS process is gone. |
+| `process_logs` | `session_id: str, process_id: str, lines: int = 100` | `{text, truncated, lines_requested}` | Tail combined stdout+stderr; max 1000 lines. |
+| `process_stop` | `session_id: str, process_id: str` | `ProcessResponse` | SIGTERM, then SIGKILL after the grace window. Drops the registry row. |
+
+> ⚠️ **`argv` is visible** to any token holding the `processes`
+> scope (via `process_list` / `process_get`). Pass credentials via
+> `env`, never as positional args. Operators handling sensitive
+> workloads should issue tokens without `processes` scope.
+
+`Limits`, `ExecRequest`, `ExecResponse`, `FileWriteRequest`,
+`FileListResponse`, `StartProcessRequest`, `ProcessResponse`, and
+`ProcessListResponse` are the same Pydantic models the HTTP API
+uses; their schemas appear in the MCP tool definitions verbatim and
+in `/openapi.json`.
 
 ## Client setup
 

@@ -77,6 +77,57 @@ def test_write_happy_path(authed, fake_docker):
     assert call["mode"] == 0o644
 
 
+def test_write_creates_nested_path(authed, fake_docker):
+    """Issue #2 reproducer: a nested path like `sub/keep.txt` should
+    succeed because put_archive_file's mkdir -p creates the parent
+    directory. Previously this 500'd because /workspace was unwritable
+    to the agent (issue #3); the fixture's fake_docker just records the
+    call, so what we verify here is that the request actually reaches
+    put_archive_file with the correct abs_path and content."""
+    sid = _create(authed)
+    body = base64.b64encode(b"keep").decode()
+    r = authed.post(
+        f"/v1/sessions/{sid}/files",
+        json={"path": "sub/keep.txt", "content_b64": body, "mode": 0o644},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["path"] == "/workspace/sub/keep.txt"
+    call = fake_docker.put_archive_calls[-1]
+    assert call["abs_path"] == "/workspace/sub/keep.txt"
+    assert call["content"] == b"keep"
+
+
+def test_write_raw_path_in_url(authed, fake_docker):
+    """POST /v1/sessions/{sid}/files/{path:path} accepts raw bytes
+    via application/octet-stream and is symmetric with GET/DELETE."""
+    sid = _create(authed)
+    r = authed.post(
+        f"/v1/sessions/{sid}/files/path/from/url.txt?mode=420",
+        content=b"raw bytes \x00\xff",
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["path"] == "/workspace/path/from/url.txt"
+    assert r.json()["size"] == 12
+    call = fake_docker.put_archive_calls[-1]
+    assert call["abs_path"] == "/workspace/path/from/url.txt"
+    assert call["content"] == b"raw bytes \x00\xff"
+    assert call["mode"] == 0o644
+
+
+def test_write_raw_rejects_traversal(authed):
+    sid = _create(authed)
+    r = authed.post(
+        f"/v1/sessions/{sid}/files/../etc/passwd",
+        content=b"x",
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    # Starlette normalises `..` segments before routing; the request
+    # either fails to route (404) or hits the path-validator (400).
+    # Either is correct — the workspace must NOT be escaped.
+    assert r.status_code in (400, 404)
+
+
 def test_write_rejects_path_traversal(authed):
     sid = _create(authed)
     r = authed.post(

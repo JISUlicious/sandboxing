@@ -121,6 +121,42 @@ def test_create_volume_chowns_bind_when_uid_set(tmp_path):
     assert chmod_calls == [(str(base / "session-x"), 0o700)]
 
 
+def test_create_volume_falls_back_to_0777_when_chown_fails(tmp_path):
+    """When the underlying filesystem refuses chown (SMB without forceuid,
+    NFS without idmapping, FUSE), the create_volume path must NOT propagate
+    the OSError — it logs a warning and falls back to mode 0o777 so the
+    session can still come up. The operator's mount options are the real
+    fix; this is just so a 500 ISE on session create becomes a working
+    session + a log line."""
+    base = tmp_path / "volumes"
+    settings = Settings(
+        api_token="t",
+        quota_volume_base=base,
+        bind_volume_uid=110001,
+    )
+    client = _docker_client_with_fake_engine(settings)
+
+    chown_calls: list[tuple[str, int, int]] = []
+    chmod_calls: list[tuple[str, int]] = []
+
+    def fake_chown(path, uid, gid):
+        chown_calls.append((str(path), uid, gid))
+        raise OSError(1, "Operation not permitted")
+
+    def fake_chmod(self, mode):
+        chmod_calls.append((str(self), mode))
+
+    with (
+        patch("api.docker_client.os.chown", fake_chown),
+        patch.object(type(base), "chmod", fake_chmod),
+    ):
+        client.create_volume("vol-x", "session-x", "tenant-x")
+
+    # chown was attempted (and failed), chmod 0o777 fallback ran.
+    assert chown_calls == [(str(base / "session-x"), 110001, 110001)]
+    assert chmod_calls == [(str(base / "session-x"), 0o777)]
+
+
 def test_create_volume_falls_back_to_0777_when_uid_unset(tmp_path):
     """Back-compat: without bind_volume_uid, the legacy 0777 stopgap stays."""
     base = tmp_path / "volumes"

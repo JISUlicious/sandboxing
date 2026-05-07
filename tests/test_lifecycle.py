@@ -76,6 +76,39 @@ def test_unknown_session_returns_404(authed):
     assert r.status_code == 404
 
 
+def test_image_not_found_returns_structured_503(authed, fake_docker):
+    """Issue #9 from the e2e — when docker-py raises ImageNotFound the
+    control plane previously surfaced a plain-text 500. After the
+    exception handler ships, the response is a structured 503 with the
+    `image_not_found` code so clients can distinguish 'transient daemon
+    issue, retry once you've pulled the image' from a programming bug."""
+    import docker.errors as docker_errors
+
+    def boom(**_kw: object) -> str:
+        raise docker_errors.ImageNotFound("image ghcr.io/x/y:tag not found locally")
+
+    fake_docker.create_container = boom  # type: ignore[method-assign]
+    r = authed.post("/v1/sessions", json={})
+    assert r.status_code == 503, r.text
+    body = r.json()
+    assert body["detail"]["code"] == "image_not_found"
+    assert "not found" in body["detail"]["message"].lower()
+
+
+def test_docker_api_error_returns_structured_503(authed, fake_docker):
+    """Other docker.errors.APIError subclasses (daemon down, network
+    issues, conflict, etc.) also surface as 503 with `docker_api_error`."""
+    import docker.errors as docker_errors
+
+    def boom(**_kw: object) -> str:
+        raise docker_errors.APIError("Bad Gateway from daemon")
+
+    fake_docker.create_container = boom  # type: ignore[method-assign]
+    r = authed.post("/v1/sessions", json={})
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["code"] == "docker_api_error"
+
+
 def test_limit_exceeded_returns_429(authed):
     r = authed.post(
         "/v1/sessions",

@@ -947,7 +947,7 @@
   "info": {
     "description": "\nControl plane for an LLM-agent sandbox service. See\n[SPECIFICATION.md](https://github.com/JISUlicious/sandboxing/blob/main/SPECIFICATION.md)\nand\n[ARCHITECTURE.md](https://github.com/JISUlicious/sandboxing/blob/main/ARCHITECTURE.md)\nfor the full contract.\n\nEvery session is a long-lived, hardened container. Filesystem state in\n`/workspace` persists across exec calls and across stop/resume; process\nstate does not (SPEC-002). All endpoints under `/v1/sessions` require a\nbearer token in the `Authorization` header.\n",
     "title": "Sandbox Service",
-    "version": "0.1.7"
+    "version": "0.1.8"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1026,7 +1026,7 @@
     },
     "/v1/sessions": {
       "post": {
-        "description": "Creates a long-lived sandbox session under the calling tenant. Starts in `RUNNING` with an empty `/workspace` (SPEC-101). `limits` are merged with tenant-default values; per-field caps are enforced (SPEC-100, SPEC-300).",
+        "description": "Creates a long-lived sandbox session under the calling tenant. Starts in `RUNNING` with an empty `/workspace` (SPEC-101). `limits` are merged with tenant-default values; per-field caps are enforced (SPEC-100, SPEC-300). Per-field violations return `400 limit_exceeded`; tenant concurrency caps return `429 limit_exceeded`.",
         "operationId": "create_session_v1_sessions_post",
         "parameters": [
           {
@@ -1080,6 +1080,16 @@
                 }
               }
             }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -1354,7 +1364,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -1483,7 +1493,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -1702,7 +1712,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -1819,7 +1829,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -1919,7 +1929,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -2060,7 +2070,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -2248,7 +2258,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -2379,7 +2389,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -2399,7 +2409,7 @@
                 }
               }
             },
-            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+            "description": "Session or process not found (`session_not_found` / `process_not_found`)."
           },
           "422": {
             "content": {
@@ -2474,7 +2484,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -2494,7 +2504,7 @@
                 }
               }
             },
-            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+            "description": "Session or process not found (`session_not_found` / `process_not_found`)."
           },
           "422": {
             "content": {
@@ -2568,7 +2578,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -2588,7 +2598,7 @@
                 }
               }
             },
-            "description": "Session not found, not owned by the calling tenant, or already DESTROYED (SPEC-200)."
+            "description": "Session or process not found (`session_not_found` / `process_not_found`)."
           },
           "422": {
             "content": {
@@ -2934,7 +2944,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -3257,7 +3267,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {
@@ -3359,7 +3369,7 @@
                 }
               }
             },
-            "description": "Validation failure: `invalid_argument`, `invalid_path`, etc."
+            "description": "Validation failure: `invalid_argument`, `invalid_path`, or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
           },
           "401": {
             "content": {

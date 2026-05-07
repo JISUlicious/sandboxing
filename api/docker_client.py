@@ -580,13 +580,19 @@ class DockerClient:
         """Detach-spawn `argv` inside the container under a thin bash
         supervisor that:
 
-        - Writes its own OS PID to `pid_path` *before* `exec`-ing argv,
-          so the supervisor PID == the user-process PID for the
-          lifetime of the process. (Subsequent `kill <pid>` from the
-          control plane reaches the user process directly.)
-        - On EXIT, traps and writes the exit code (or 137 on SIGKILL,
-          143 on SIGTERM as `bash` reports them) to `exit_path`.
+        - Backgrounds the user process and records its PID in `pid_path`,
+          so `kill <pid>` from the control plane reaches the user
+          process directly.
+        - `wait`s on the child and writes its exit code to `exit_path`
+          right after the child terminates.
         - Redirects user stdout+stderr into `log_path`.
+
+        The earlier shape used `exec argv` after setting an EXIT trap.
+        That was a bug: `exec` replaces the bash process with `argv`, so
+        the trap-bearing bash is gone before the child exits. exit_path
+        was never written; clients saw `state="EXITED"` with
+        `exit_code=null` forever. Fix is to keep bash alive as the
+        parent of the child and capture `$?` from `wait`.
 
         Returns the docker exec id (informational; the caller usually
         cares about the ospid which it reads from `pid_path` after a
@@ -595,14 +601,24 @@ class DockerClient:
         # Single-quote-safe shell rendering of argv.
         argv_quoted = " ".join(_sh_quote(a) for a in argv)
         env_lines = "".join(f"export {k}={_sh_quote(v)}\n" for k, v in (env or {}).items())
+        # Subshell + background:
+        #   - The `(...) &` form runs argv in a subshell; bash records
+        #     the subshell PID in $!. The user process is exec'd inside
+        #     the subshell, so kill -TERM $! reaches it directly.
+        #   - `wait $!` blocks until the child exits and reflects its
+        #     exit status in $?. The trailing `echo $? > $exit_path`
+        #     records the exit code BEFORE bash itself exits — closes
+        #     the race the trap-after-exec form opened.
         script = (
             "set +e\n"
             f"mkdir -p {_sh_quote(posixpath.dirname(pid_path))}\n"
             f"cd {_sh_quote(cwd)}\n"
             f"{env_lines}"
-            f'echo "$$" > {_sh_quote(pid_path)}\n'
-            f"trap 'echo $? > {_sh_quote(exit_path)}' EXIT\n"
-            f"exec {argv_quoted} > {_sh_quote(log_path)} 2>&1\n"
+            f"( exec {argv_quoted} > {_sh_quote(log_path)} 2>&1 ) &\n"
+            f"CHILD_PID=$!\n"
+            f'echo "$CHILD_PID" > {_sh_quote(pid_path)}\n'
+            f'wait "$CHILD_PID"\n'
+            f"echo $? > {_sh_quote(exit_path)}\n"
         )
         api = self.client.api
         exec_id = api.exec_create(

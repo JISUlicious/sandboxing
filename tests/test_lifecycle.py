@@ -121,7 +121,12 @@ def test_docker_api_error_returns_structured_503(authed, fake_docker):
     assert r.json()["detail"]["code"] == "docker_api_error"
 
 
-def test_limit_exceeded_returns_429(authed):
+def test_per_field_limits_violation_returns_400(authed):
+    """SPEC-100: per-field request limits exceeding tenant caps are
+    400, not 429. (Pre-v0.1.8 this asserted 429 — the customer audit
+    Bug #13 flagged it as wrong against SPEC-100, since 429 implies
+    "retry might help" but a malformed body never will.) Code stays
+    `limit_exceeded` so existing error handling still matches."""
     r = authed.post(
         "/v1/sessions",
         json={
@@ -135,5 +140,6 @@ def test_limit_exceeded_returns_429(authed):
             }
         },
     )
-    assert r.status_code == 429
+    assert r.status_code == 400
     assert r.json()["detail"]["code"] == "limit_exceeded"
+    assert "vcpu" in r.json()["detail"]["message"]

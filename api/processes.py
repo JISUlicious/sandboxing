@@ -28,6 +28,7 @@ from api.errors import (
     InvalidArgument,
     InvalidState,
     LimitExceeded,
+    ProcessNotFound,
 )
 from api.models import ProcessResponse, StartProcessRequest
 from api.registry import ProcessRow, Registry, now_ms
@@ -145,7 +146,7 @@ class ProcessService:
             session_id=session_id, process_id=process_id, tenant_id=tenant_id
         )
         if row is None:
-            raise InvalidArgument(f"process_id {process_id} not found in session")
+            raise ProcessNotFound(process_id)
         if row.state == "RUNNING":
             row = await self._maybe_refresh(row, session_id, force=True)
         return _row_to_response(row)
@@ -166,7 +167,7 @@ class ProcessService:
             session_id=session_id, process_id=process_id, tenant_id=tenant_id
         )
         if row is None:
-            raise InvalidArgument(f"process_id {process_id} not found in session")
+            raise ProcessNotFound(process_id)
         if row.state == "EXITED" or row.ospid is None:
             return _row_to_response(row)
         assert session.container_id is not None
@@ -206,7 +207,7 @@ class ProcessService:
             session_id=session_id, process_id=process_id, tenant_id=tenant_id
         )
         if row is None:
-            raise InvalidArgument(f"process_id {process_id} not found in session")
+            raise ProcessNotFound(process_id)
         if session.container_id is None:
             return "", False
         return await asyncio.to_thread(
@@ -286,15 +287,25 @@ class ProcessService:
         if alive:
             await self._registry.touch_process_polled(row.id)
             return row
-        # Dead: read the exit file. Empty / missing → unknown exit.
-        exit_text = await asyncio.to_thread(
-            self._docker.read_text_in_container, session.container_id, row.exit_path
-        )
+        # Dead: read the exit file. There is a small race window between
+        # the child process terminating and the bash supervisor writing
+        # `$?` to exit_path (a few ms in practice). Retry with backoff
+        # so we don't permanently mark exit_code=null when we caught
+        # the supervisor mid-write. Once the row is in EXITED, _maybe_refresh
+        # never re-runs, so getting this right on the first dead-detection
+        # is critical.
         exit_code: int | None = None
-        if exit_text is not None:
-            stripped = exit_text.strip()
-            if stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit()):
-                exit_code = int(stripped)
+        for attempt in range(5):
+            exit_text = await asyncio.to_thread(
+                self._docker.read_text_in_container, session.container_id, row.exit_path
+            )
+            if exit_text is not None:
+                stripped = exit_text.strip()
+                if stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit()):
+                    exit_code = int(stripped)
+                    break
+            if attempt < 4:
+                await asyncio.sleep(0.05 * (attempt + 1))  # 50, 100, 150, 200 ms
         await self._registry.mark_process_exited(process_id=row.id, exit_code=exit_code)
         refreshed = await self._registry.get_process(
             session_id=session_id, process_id=row.id, tenant_id=row.tenant_id

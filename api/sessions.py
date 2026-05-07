@@ -12,7 +12,7 @@ from api import metrics, quota
 from api.audit import AuditEmitter
 from api.config import Settings
 from api.docker_client import DockerClient
-from api.errors import InvalidState, LimitExceeded, SessionNotFound
+from api.errors import InvalidLimits, InvalidState, LimitExceeded, SessionNotFound
 from api.models import Limits
 from api.registry import Registry, SessionRow
 
@@ -346,5 +346,6 @@ class SessionService:
     @staticmethod
     def _validate_limits(limits: Limits) -> None:
         for field, cap in _TENANT_MAX.items():
-            if getattr(limits, field) > cap:
-                raise LimitExceeded(f"{field} exceeds tenant max ({cap})")
+            value = getattr(limits, field)
+            if value > cap:
+                raise InvalidLimits(f"limits.{field}={value} exceeds tenant max ({cap})")

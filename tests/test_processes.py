@@ -74,10 +74,12 @@ def test_delete_kills_running_process(authed, fake_docker):
     # Real signal was sent (SIGTERM at minimum).
     sigs = [s for cid, op, s in fake_docker.signal_pid_calls if op == ospid]
     assert 15 in sigs
-    # Row is gone afterwards.
+    # Row is gone afterwards. v0.1.8: 404 process_not_found, NOT
+    # 400 invalid_argument — "this resource doesn't exist" isn't a
+    # malformed request.
     r2 = authed.get(f"/v1/sessions/{sid}/processes/{p['process_id']}")
-    assert r2.status_code == 400
-    assert r2.json()["detail"]["code"] == "invalid_argument"
+    assert r2.status_code == 404
+    assert r2.json()["detail"]["code"] == "process_not_found"
 
 
 def test_delete_already_exited_is_idempotent(authed, fake_docker):
@@ -261,3 +263,64 @@ def test_invalid_path_sub_codes(authed):
     # normalization eats `/.`-style segments before they reach the
     # route handler. Coverage exists at the unit level via the
     # _resolve_workspace_path helper.
+
+
+# ---------------------------------------------------------------------
+# v0.1.8 customer-audit regressions
+# ---------------------------------------------------------------------
+
+
+def test_exit_code_populated_after_clean_exit(authed, fake_docker):
+    """Bug #10: state=EXITED but exit_code=null was caused by the bash
+    supervisor `exec`-ing argv after setting `trap ... EXIT` — the
+    trap-bearing bash was gone before the child exited, so exit_path
+    was never written. The fixed supervisor backgrounds the child,
+    `wait`s, and writes $? to exit_path right after the child dies.
+    Locks down the contract: state=EXITED → exit_code is the actual
+    integer the child returned."""
+    sid = _create_session(authed)
+    p = _start(authed, sid).json()
+    ospid = fake_docker.spawn_supervised_calls[-1]["ospid"]
+    fake_docker.simulate_process_exit(ospid, exit_code=7)
+    r = authed.get(f"/v1/sessions/{sid}/processes/{p['process_id']}")
+    body = r.json()
+    assert body["state"] == "EXITED"
+    assert body["exit_code"] == 7, "exit_code must reflect child's actual return value"
+
+
+def test_missing_process_returns_404_process_not_found(authed):
+    """Bug #11: looking up a process that doesn't exist (or was deleted)
+    returned `400 invalid_argument`; should be `404 process_not_found`."""
+    sid = _create_session(authed)
+    r = authed.get(f"/v1/sessions/{sid}/processes/01ABCDEFGHIJKLMNOP1234567X")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "process_not_found"
+
+
+def test_per_field_limits_violation_returns_400(authed):
+    """Bug #13: per-field request limits exceeding tenant caps returned
+    `429 limit_exceeded`. SPEC-100 says it must be 400 — bad client
+    input, not rate limiting. The `limit_exceeded` code is preserved
+    so existing client error handling still matches."""
+    r = authed.post("/v1/sessions", json={"limits": {"exec_timeout_s": 99999}})
+    assert r.status_code == 400
+    body = r.json()
+    assert body["detail"]["code"] == "limit_exceeded"
+    assert "exec_timeout_s" in body["detail"]["message"]
+    assert "exceeds tenant max" in body["detail"]["message"]
+
+
+def test_concurrency_cap_still_returns_429(authed):
+    """Companion to the bug #13 fix — make sure the *legitimate* 429
+    case (tenant concurrency cap, retry-might-help) didn't regress to
+    400 in the rename. v0.1.0 test_limit_exceeded_returns_429 covers
+    this in test_lifecycle.py too; we keep one here so the split is
+    visible in both files."""
+    # Concurrency cap is hard to hit in this fixture (default 50);
+    # just verify the existing per-session process cap, which uses the
+    # same LimitExceeded class, still returns 429.
+    sid = _create_session(authed, max_processes=1)
+    _start(authed, sid)  # 1st succeeds
+    r = _start(authed, sid)  # 2nd hits the cap
+    assert r.status_code == 429
+    assert r.json()["detail"]["code"] == "limit_exceeded"

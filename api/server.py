@@ -103,7 +103,10 @@ TAGS_METADATA = [
 ERR_BAD_REQUEST = {
     400: {
         "model": ErrorResponse,
-        "description": "Validation failure: `invalid_argument`, `invalid_path`, etc.",
+        "description": (
+            "Validation failure: `invalid_argument`, `invalid_path`, "
+            "or `limit_exceeded` (per-field request limits exceed tenant caps; SPEC-100)."
+        ),
     }
 }
 ERR_UNAUTHORIZED = {
@@ -124,6 +127,14 @@ ERR_NOT_FOUND_FILE = {
     404: {
         "model": ErrorResponse,
         "description": "Session or file not found (`session_not_found` / `file_not_found`).",
+    }
+}
+ERR_NOT_FOUND_PROCESS = {
+    404: {
+        "model": ErrorResponse,
+        "description": (
+            "Session or process not found (`session_not_found` / `process_not_found`)."
+        ),
     }
 }
 ERR_TIMEOUT = {
@@ -268,7 +279,7 @@ def create_app(
         title="Sandbox Service",
         # Track the release tag. Bump on every spec-affecting change so
         # consumers pinned against an older version can detect drift.
-        version="0.1.7",
+        version="0.1.8",
         description=API_DESCRIPTION,
         openapi_tags=TAGS_METADATA,
         lifespan=lifespan,
@@ -500,9 +511,11 @@ def create_app(
             "Creates a long-lived sandbox session under the calling tenant. "
             "Starts in `RUNNING` with an empty `/workspace` (SPEC-101). "
             "`limits` are merged with tenant-default values; per-field caps "
-            "are enforced (SPEC-100, SPEC-300)."
+            "are enforced (SPEC-100, SPEC-300). Per-field violations return "
+            "`400 limit_exceeded`; tenant concurrency caps return "
+            "`429 limit_exceeded`."
         ),
-        responses={**ERR_UNAUTHORIZED, **ERR_RATE_LIMIT},
+        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_RATE_LIMIT},
     )
     async def create_session(
         req: CreateSessionRequest, tenant: str = Depends(require_scope("session_create"))
@@ -1167,7 +1180,7 @@ def create_app(
         tags=["Processes"],
         summary="Get one process",
         response_model=ProcessResponse,
-        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
+        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_PROCESS},
     )
     async def get_process(
         session_id: str, process_id: str, tenant_id: str = Depends(require_scope("processes"))
@@ -1181,7 +1194,7 @@ def create_app(
         tags=["Processes"],
         summary="Stop and delete a process",
         response_model=ProcessResponse,
-        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
+        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_PROCESS},
     )
     async def delete_process(
         session_id: str, process_id: str, tenant_id: str = Depends(require_scope("processes"))
@@ -1213,7 +1226,7 @@ def create_app(
             },
             **ERR_BAD_REQUEST,
             **ERR_UNAUTHORIZED,
-            **ERR_NOT_FOUND_SESSION,
+            **ERR_NOT_FOUND_PROCESS,
         },
     )
     async def stream_process_logs(
@@ -1227,9 +1240,9 @@ def create_app(
             session_id=session_id, process_id=process_id, tenant_id=tenant_id
         )
         if proc_row is None:
-            from api.errors import InvalidArgument as _InvalidArgument
+            from api.errors import ProcessNotFound as _ProcessNotFound
 
-            raise _InvalidArgument(f"process_id {process_id} not found in session")
+            raise _ProcessNotFound(process_id)
 
         async def event_iter() -> AsyncIterator[bytes]:
             # Bridge the sync docker-py iterator into asyncio via a

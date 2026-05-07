@@ -2,12 +2,12 @@
   "components": {
     "parameters": {
       "IdempotencyKey": {
-        "description": "Optional client-supplied idempotency key. The first mutating request with a given key under the calling tenant runs normally; replays of the same key within the TTL return the cached response verbatim with `Idempotent-Replay: true`. Stripe-style semantics (slice 11a).",
+        "description": "OPTIONAL but STRONGLY RECOMMENDED on every mutating call. The first request with a given key under the calling tenant runs normally; replays of the same (route, key) within the TTL (default 24h) return the cached response verbatim with the `Idempotent-Replay: true` response header. Replays against a different route for the same key return `409 idempotency_route_mismatch`. Suggested format: UUIDv4 (Stripe-style semantics; slice 11a).",
         "in": "header",
         "name": "Idempotency-Key",
         "required": false,
         "schema": {
-          "maxLength": 200,
+          "maxLength": 64,
           "type": "string"
         }
       }
@@ -934,12 +934,20 @@
         "title": "ValidationError",
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "opaque",
+        "description": "Tenant-scoped opaque bearer token. Issued via `POST /v1/tenants/{tenant_id}/tokens` (admin) or bootstrapped from `SANDBOX_API_TOKEN`. Stored as HMAC-SHA256(pepper, plaintext) at rest (SPEC-405). Rotate via `POST /v1/tenants/me/tokens/rotate`; previous tokens authenticate during a 5-minute grace window.",
+        "scheme": "bearer",
+        "type": "http"
+      }
     }
   },
   "info": {
     "description": "\nControl plane for an LLM-agent sandbox service. See\n[SPECIFICATION.md](https://github.com/JISUlicious/sandboxing/blob/main/SPECIFICATION.md)\nand\n[ARCHITECTURE.md](https://github.com/JISUlicious/sandboxing/blob/main/ARCHITECTURE.md)\nfor the full contract.\n\nEvery session is a long-lived, hardened container. Filesystem state in\n`/workspace` persists across exec calls and across stop/resume; process\nstate does not (SPEC-002). All endpoints under `/v1/sessions` require a\nbearer token in the `Authorization` header.\n",
     "title": "Sandbox Service",
-    "version": "0.1.0"
+    "version": "0.1.6"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -963,6 +971,7 @@
             "description": "Successful Response"
           }
         },
+        "security": [],
         "summary": "Liveness probe",
         "tags": [
           "Operations"
@@ -981,6 +990,7 @@
             "description": "Metrics in Prometheus exposition format."
           }
         },
+        "security": [],
         "summary": "Prometheus metrics",
         "tags": [
           "Operations"
@@ -1007,6 +1017,7 @@
             "description": "Successful Response"
           }
         },
+        "security": [],
         "summary": "Readiness probe",
         "tags": [
           "Operations"
@@ -2000,6 +2011,18 @@
             "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "description": "Raw file bytes. Empty body creates a zero-length file (touch-like).",
+          "required": false
+        },
         "responses": {
           "201": {
             "content": {
@@ -2492,6 +2515,7 @@
     },
     "/v1/sessions/{session_id}/processes/{process_id}/logs": {
       "get": {
+        "description": "Server-Sent Events stream of the process's combined stdout+stderr log. Each SSE frame is `event: log` with a `data: {\"chunk_b64\": \"<base64>\"}` payload \u2014 base64 keeps binary log content (ANSI escapes, NULs) round-tripping cleanly. The stream stays open until the client disconnects or the underlying process exits.\n\nOpenAPI tooling does not generate useful clients for SSE; consume with a streaming HTTP client (`httpx`, `curl -N`, etc.).",
         "operationId": "stream_process_logs_v1_sessions__session_id__processes__process_id__logs_get",
         "parameters": [
           {
@@ -2532,11 +2556,9 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
-              }
+              "text/event-stream": {}
             },
-            "description": "Successful Response"
+            "description": "SSE stream of `log` events with base64-encoded chunks."
           },
           "400": {
             "content": {
@@ -3519,6 +3541,17 @@
       }
     }
   },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "description": "Current host (relative). Override per deployment.",
+      "url": "/"
+    }
+  ],
   "tags": [
     {
       "description": "Lifecycle: create, get, stop, resume, destroy.",

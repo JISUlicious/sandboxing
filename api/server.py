@@ -265,7 +265,9 @@ def create_app(
 
     app = FastAPI(
         title="Sandbox Service",
-        version="0.1.0",
+        # Track the release tag. Bump on every spec-affecting change so
+        # consumers pinned against an older version can detect drift.
+        version="0.1.6",
         description=API_DESCRIPTION,
         openapi_tags=TAGS_METADATA,
         lifespan=lifespan,
@@ -277,12 +279,13 @@ def create_app(
     app.state.mcp = mcp_
     app.state.processes = process_service_
 
-    # Document the Idempotency-Key contract (slice 11a) in OpenAPI.
-    # The middleware honours the header on every mutation under /v1/,
-    # but FastAPI's default schema generator never sees the middleware,
-    # so SDK generators don't know the parameter exists. Inject it
-    # post-hoc.
-    _install_idempotency_openapi(app)
+    # Polish the OpenAPI schema FastAPI generates so it aligns with
+    # what the running app actually does: declare the Idempotency-Key
+    # header (slice 11a) + Idempotent-Replay response header, declare
+    # bearerAuth + per-route security, fix the requestBody on the
+    # raw-body file POST, declare a servers placeholder. None of this
+    # changes runtime behaviour — purely contract documentation.
+    _install_openapi_polish(app)
 
     # Slice 8e: TLS-readiness — when running behind a reverse proxy
     # that terminates TLS (Caddy / nginx in deploy/tls/*.example),
@@ -1190,7 +1193,27 @@ def create_app(
         "/v1/sessions/{session_id}/processes/{process_id}/logs",
         tags=["Processes"],
         summary="Tail a process's combined stdout+stderr log over SSE",
-        responses={**ERR_BAD_REQUEST, **ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
+        description=(
+            "Server-Sent Events stream of the process's combined "
+            "stdout+stderr log. Each SSE frame is `event: log` with a "
+            '`data: {"chunk_b64": "<base64>"}` payload — base64 keeps '
+            "binary log content (ANSI escapes, NULs) round-tripping "
+            "cleanly. The stream stays open until the client "
+            "disconnects or the underlying process exits.\n\n"
+            "OpenAPI tooling does not generate useful clients for SSE; "
+            "consume with a streaming HTTP client (`httpx`, `curl -N`, "
+            "etc.)."
+        ),
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "content": {"text/event-stream": {}},
+                "description": "SSE stream of `log` events with base64-encoded chunks.",
+            },
+            **ERR_BAD_REQUEST,
+            **ERR_UNAUTHORIZED,
+            **ERR_NOT_FOUND_SESSION,
+        },
     )
     async def stream_process_logs(
         session_id: str, process_id: str, tenant_id: str = Depends(require_scope("processes"))
@@ -1250,62 +1273,147 @@ def create_app(
 
 
 _IDEMPOTENT_METHODS = ("post", "put", "patch", "delete")
+_HTTP_METHODS = ("get", "post", "put", "patch", "delete")
+# Public endpoints that don't require a bearer token. Anything else
+# under the FastAPI app is bearer-protected at the route layer.
+_PUBLIC_PATHS = frozenset({"/healthz", "/readyz", "/metrics"})
 
 
-def _install_idempotency_openapi(app: FastAPI) -> None:
-    """Wrap `app.openapi` so the generated schema declares the
-    `Idempotency-Key` request header on every mutating /v1/ route
-    and the `Idempotent-Replay` response header on their 2xx
-    responses. Cached on `app.openapi_schema` after the first call,
-    matching FastAPI's standard pattern."""
+def _install_openapi_polish(app: FastAPI) -> None:
+    """Wrap `app.openapi` so the generated schema documents:
+
+    - bearerAuth security scheme + a global default + opt-outs on
+      the public ops endpoints (alignment with the auth dependency
+      every /v1/ route declares).
+    - Idempotency-Key request header on every mutating /v1/ route
+      and the Idempotent-Replay response header on their 2xx
+      responses (slice 11a; the middleware sees the header, FastAPI's
+      default generator doesn't).
+    - requestBody for POST /v1/sessions/{sid}/files/{path}; the
+      handler reads `await request.body()` directly so FastAPI can't
+      introspect the shape.
+    - A relative `servers` entry so SDK generators have a base URL.
+
+    Cached on `app.openapi_schema` after the first call, matching
+    FastAPI's standard pattern. Pure documentation — no runtime
+    behaviour change.
+    """
     from fastapi.openapi.utils import get_openapi
 
     def _augment(schema: dict) -> dict:
         components = schema.setdefault("components", {})
-        parameters = components.setdefault("parameters", {})
-        parameters.setdefault(
-            "IdempotencyKey",
+
+        # ----- security: bearerAuth + global default + public opt-out -----
+        schemes = components.setdefault("securitySchemes", {})
+        schemes.setdefault(
+            "bearerAuth",
             {
-                "name": "Idempotency-Key",
-                "in": "header",
-                "required": False,
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "opaque",
                 "description": (
-                    "Optional client-supplied idempotency key. The "
-                    "first mutating request with a given key under "
-                    "the calling tenant runs normally; replays of "
-                    "the same key within the TTL return the cached "
-                    "response verbatim with `Idempotent-Replay: "
-                    "true`. Stripe-style semantics (slice 11a)."
+                    "Tenant-scoped opaque bearer token. Issued via "
+                    "`POST /v1/tenants/{tenant_id}/tokens` (admin) or "
+                    "bootstrapped from `SANDBOX_API_TOKEN`. Stored as "
+                    "HMAC-SHA256(pepper, plaintext) at rest "
+                    "(SPEC-405). Rotate via "
+                    "`POST /v1/tenants/me/tokens/rotate`; previous "
+                    "tokens authenticate during a 5-minute grace "
+                    "window."
                 ),
-                "schema": {"type": "string", "maxLength": 200},
             },
         )
+        schema.setdefault("security", [{"bearerAuth": []}])
+
+        # ----- servers: relative URL placeholder -----
+        # Operators front this with reverse proxies on operator-
+        # specific URLs, so we ship a relative-URL placeholder; SDK
+        # generators that respect `servers` will resolve against the
+        # host the spec was fetched from.
+        schema.setdefault(
+            "servers",
+            [
+                {
+                    "url": "/",
+                    "description": "Current host (relative). Override per deployment.",
+                }
+            ],
+        )
+
+        # ----- IdempotencyKey parameter -----
+        parameters = components.setdefault("parameters", {})
+        parameters["IdempotencyKey"] = {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": False,
+            "description": (
+                "OPTIONAL but STRONGLY RECOMMENDED on every mutating "
+                "call. The first request with a given key under the "
+                "calling tenant runs normally; replays of the same "
+                "(route, key) within the TTL (default 24h) return the "
+                "cached response verbatim with the "
+                "`Idempotent-Replay: true` response header. Replays "
+                "against a different route for the same key return "
+                "`409 idempotency_route_mismatch`. Suggested format: "
+                "UUIDv4 (Stripe-style semantics; slice 11a)."
+            ),
+            "schema": {"type": "string", "maxLength": 64},
+        }
         replay_header = {
-            "Idempotent-Replay": {
-                "description": (
-                    "Set to `true` when this response was replayed "
-                    "from the idempotency cache rather than freshly "
-                    "computed."
-                ),
-                "schema": {"type": "string", "enum": ["true"]},
-            }
+            "description": (
+                "Set to `true` when this response was replayed from "
+                "the idempotency cache rather than freshly computed."
+            ),
+            "schema": {"type": "string", "enum": ["true"]},
         }
         ref = {"$ref": "#/components/parameters/IdempotencyKey"}
+
+        # ----- per-path / per-operation polish -----
         for path, item in (schema.get("paths") or {}).items():
-            if not path.startswith("/v1/"):
+            # Public endpoints opt out of the global bearerAuth.
+            if path in _PUBLIC_PATHS:
+                for method in _HTTP_METHODS:
+                    op = item.get(method)
+                    if op is not None:
+                        op["security"] = []
                 continue
-            for method in _IDEMPOTENT_METHODS:
-                op = item.get(method)
-                if not op:
-                    continue
-                op.setdefault("parameters", [])
-                if ref not in op["parameters"]:
-                    op["parameters"].append(ref)
-                for status, resp in (op.get("responses") or {}).items():
-                    if not status.startswith("2"):
+
+            # /v1/ routes get the Idempotency-Key + Idempotent-Replay.
+            if path.startswith("/v1/"):
+                for method in _IDEMPOTENT_METHODS:
+                    op = item.get(method)
+                    if not op:
                         continue
-                    headers = resp.setdefault("headers", {})
-                    headers.setdefault("Idempotent-Replay", replay_header["Idempotent-Replay"])
+                    op.setdefault("parameters", [])
+                    if ref not in op["parameters"]:
+                        op["parameters"].append(ref)
+                    for status, resp in (op.get("responses") or {}).items():
+                        if not status.startswith("2"):
+                            continue
+                        headers = resp.setdefault("headers", {})
+                        headers.setdefault("Idempotent-Replay", replay_header)
+
+        # ----- POST /v1/sessions/{sid}/files/{path} requestBody -----
+        # The handler reads `await request.body()` directly; FastAPI
+        # can't infer the body shape, so we declare it explicitly.
+        # Empty bodies remain valid (touch-like creation of a 0-byte
+        # file), so requestBody is not marked required.
+        files_path_post = (
+            schema.get("paths", {}).get("/v1/sessions/{session_id}/files/{path}", {}).get("post")
+        )
+        if files_path_post is not None and "requestBody" not in files_path_post:
+            files_path_post["requestBody"] = {
+                "required": False,
+                "description": (
+                    "Raw file bytes. Empty body creates a zero-length file (touch-like)."
+                ),
+                "content": {
+                    "application/octet-stream": {
+                        "schema": {"type": "string", "format": "binary"},
+                    },
+                },
+            }
+
         return schema
 
     def custom_openapi() -> dict:

@@ -224,7 +224,12 @@ EOF
 sudo chown root:root /etc/cifs.creds && sudo chmod 0600 /etc/cifs.creds
 
 # 2. Compute the dockremap UID once — used both in fstab and env.
-DOCKREMAP_UID=$(awk -F: '$1=="dockremap"{print $2 + 10000}' /etc/subuid)
+DOCKREMAP_UID=$(awk -F: '$1=="dockremap"{print $2 + 10001}' /etc/subuid)
+# +10001 because the container's agent user is UID 10001 inside the
+# container; userns-remap maps that to subuid_start + 10001 on the host.
+# (NOT +10000 — that's an off-by-one that leaves /workspace owned by
+# the host UID corresponding to container UID 10000, which the agent
+# isn't, so mkdir / write under /workspace get EACCES.)
 echo "use uid=$DOCKREMAP_UID in fstab"
 
 # 3. Add to /etc/fstab. The forceuid/forcegid quartet makes every

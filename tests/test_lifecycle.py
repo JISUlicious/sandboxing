@@ -76,6 +76,18 @@ def test_unknown_session_returns_404(authed):
     assert r.status_code == 404
 
 
+def test_create_normalizes_workspace_perms_after_start(authed, fake_docker):
+    """v0.1.7: SessionService.create runs DockerClient.normalize_workspace_perms
+    after start_container so /workspace is agent-owned even when the host
+    fs silently dropped our bind-side chown (e.g., Apple-served SMB)."""
+    r = authed.post("/v1/sessions", json={})
+    assert r.status_code == 201, r.text
+    cid = fake_docker.created_containers[0][0]
+    # Both calls happened, in order: start then normalize.
+    assert fake_docker.started == [cid]
+    assert fake_docker.workspace_perm_calls == [cid]
+
+
 def test_image_not_found_returns_structured_503(authed, fake_docker):
     """Issue #9 from the e2e — when docker-py raises ImageNotFound the
     control plane previously surfaced a plain-text 500. After the

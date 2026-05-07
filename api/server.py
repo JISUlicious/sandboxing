@@ -231,7 +231,8 @@ def create_app(
             log.warning(
                 "SANDBOX_BIND_VOLUME_UID not set; per-session volumes will "
                 "fall back to mode 0777 (SPEC-401 footgun). Compute via: "
-                "awk -F: '$1==\"dockremap\"{print $2 + 10000}' /etc/subuid"
+                "awk -F: '$1==\"dockremap\"{print $2 + 10001}' /etc/subuid "
+                "(agent UID inside the container is 10001, NOT 10000)."
             )
         await service_.registry.init()
         # Bootstrap the default tenant from settings.api_token if no
@@ -267,7 +268,7 @@ def create_app(
         title="Sandbox Service",
         # Track the release tag. Bump on every spec-affecting change so
         # consumers pinned against an older version can detect drift.
-        version="0.1.6",
+        version="0.1.7",
         description=API_DESCRIPTION,
         openapi_tags=TAGS_METADATA,
         lifespan=lifespan,

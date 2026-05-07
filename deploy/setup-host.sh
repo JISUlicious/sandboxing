@@ -270,7 +270,12 @@ else
         fail "no dockremap entry in /etc/subuid"
         exit 1
     fi
-    BIND_UID=$((DOCKREMAP_START + 10000))
+    # Container agent runs as UID 10001 (set in api.docker_client.hardening_flags),
+    # so the matching host UID is dockremap_start + 10001. (NOT +10000 — that
+    # used to be in this file and silently created an off-by-one where the
+    # bind path got chowned to the host UID for container UID 10000, leaving
+    # the agent unable to mkdir under /workspace.)
+    BIND_UID=$((DOCKREMAP_START + 10001))
     note "dockremap subuid range starts at $DOCKREMAP_START → container UID 10001 → host UID $BIND_UID"
 
     if [[ -f "$ENV_FILE" ]] && grep -q '^SANDBOX_BIND_VOLUME_UID=' "$ENV_FILE"; then

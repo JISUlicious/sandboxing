@@ -96,6 +96,14 @@ class FakeDockerClient:
     def start_container(self, container_id: str) -> None:
         self.started.append(container_id)
 
+    def normalize_workspace_perms(self, container_id: str) -> None:
+        # v0.1.7 — privileged in-container chown of /workspace. Tests
+        # can inspect `workspace_perm_calls` to confirm ordering vs
+        # start_container.
+        if not hasattr(self, "workspace_perm_calls"):
+            self.workspace_perm_calls = []
+        self.workspace_perm_calls.append(container_id)
+
     def stop_container(self, container_id: str, timeout: int = 5) -> None:
         self.stopped.append((container_id, timeout))
 

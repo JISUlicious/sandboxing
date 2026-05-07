@@ -265,6 +265,59 @@ class DockerClient:
     def start_container(self, container_id: str) -> None:
         self.client.containers.get(container_id).start()
 
+    def normalize_workspace_perms(self, container_id: str) -> None:
+        """After container start, chown /workspace to the agent UID
+        (10001:10001) inside the container so background-fs idiosyncrasies
+        don't leave the workspace unwritable.
+
+        Why this is needed: the host bind path is exposed to gVisor via
+        a 9p mount. If the underlying fs (SMB without UNIX extensions,
+        NFS without idmapping, FUSE) silently rejects our host-side
+        chown, the bind path stays owned by an out-of-userns-range UID.
+        gVisor surfaces it as `nobody:nogroup` (overflow UID 65534)
+        inside the container, mode 755 → agent (10001) is "other" and
+        can't mkdir / write under /workspace.
+
+        Running chown via a privileged docker exec re-grants CAP_CHOWN
+        for that exec only (the container's normal cap_drop=ALL still
+        applies to every other process). gVisor's VFS layer caches the
+        new ownership locally so the inside-the-container view is
+        agent-owned even when the host fs silently dropped the chown.
+
+        Best-effort: if both the host fs AND gVisor's pass-through
+        reject (rare), we log a warning and the operator's mount
+        options remain the fix. The privileged exec is one-shot and
+        completes synchronously; total added latency to session create
+        is a single short docker exec round-trip (~tens of ms)."""
+        api = self.client.api
+        for argv in (
+            ["/bin/chown", "10001:10001", "/workspace"],
+            # Tighten mode to 0700 so only the agent can read/write.
+            # SMB mounts with dir_mode=0755 cap will leave it at 0755 —
+            # which still has rwx for the owner (agent), so mkdir works.
+            ["/bin/chmod", "0700", "/workspace"],
+        ):
+            try:
+                exec_id = api.exec_create(
+                    container_id,
+                    cmd=argv,
+                    privileged=True,
+                    user="0:0",
+                )["Id"]
+                output = api.exec_start(exec_id, detach=False, stream=False)
+                rc = int(api.exec_inspect(exec_id).get("ExitCode") or 0)
+                if rc != 0:
+                    snippet = (output or b"")[:200]
+                    log.warning(
+                        "workspace perm fix %s exited rc=%d output=%r — "
+                        "operator may need to fix bind-mount UID/perm options.",
+                        argv,
+                        rc,
+                        snippet,
+                    )
+            except Exception:
+                log.exception("workspace perm fix exec %s crashed", argv)
+
     def stop_container(self, container_id: str, timeout: int = 5) -> None:
         try:
             self.client.containers.get(container_id).stop(timeout=timeout)

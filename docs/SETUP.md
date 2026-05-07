@@ -285,8 +285,9 @@ SANDBOX_QUOTA_TEARDOWN_CMD=/opt/sandbox/deploy/xfs-quota-teardown.sh
 SANDBOX_QUOTA_VOLUME_BASE=/var/lib/sandbox-volumes
 # SPEC-401 — host UID that maps to container UID 10001 under
 # userns-remap=default. setup-host.sh fills this in automatically;
-# compute manually with:
-#   awk -F: '$1=="dockremap"{print $2 + 10000}' /etc/subuid
+# compute manually with (note the +10001 — agent UID is 10001 inside
+# the container, not 10000):
+#   awk -F: '$1=="dockremap"{print $2 + 10001}' /etc/subuid
 SANDBOX_BIND_VOLUME_UID=110001
 # Slice 12 — optional admin token for the tenant-management API.
 # Single-tenant deployments don't need this; admin endpoints return
@@ -399,7 +400,8 @@ curl -H 'Authorization: Bearer '"$(sudo grep API_TOKEN /etc/sandbox/env | cut -d
 `setup-host.sh` is idempotent (re-run safe). It:
 
 1. Computes `SANDBOX_BIND_VOLUME_UID` from `/etc/subuid` (`dockremap`
-   start + 10000) and writes it into `/etc/sandbox/env`.
+   start + 10001 — matching the agent's container UID 10001) and
+   writes it into `/etc/sandbox/env`.
 2. Installs `/usr/local/bin/sandbox-quota-helper` and writes a
    single-line sudoers grant to `/etc/sudoers.d/sandbox-quota-helper`.
    Removes the legacy wildcard `sandbox-xfs-quota` entry if found.
@@ -466,8 +468,16 @@ end of the script: copy the `.bak` env file back and restart.
 - [ ] `docker info | grep -i userns` shows userns-remap=default.
 - [ ] `/var/lib/sandbox-volumes` is XFS or ext4 + prjquota.
 - [ ] `SANDBOX_BIND_VOLUME_UID` is set in `/etc/sandbox/env`
-      (= dockremap subuid start + 10000); session bind dirs are mode
-      `0700` not `0777`.
+      (= dockremap subuid start **+ 10001**, NOT +10000 — agent's
+      container UID is 10001); session bind dirs are mode `0700`
+      not `0777`.
+- [ ] On non-XFS storage (SMB/NFS/FUSE): mount options actually
+      applied — verify `mount | grep <volume_base_parent>` shows
+      `forceuid,forcegid,uid=<DOCKREMAP_UID>` if you set them in
+      fstab. Editing fstab does NOT change an already-mounted share;
+      you have to `umount && mount -a`. See `docs/DEPLOY.md` "Storage
+      backends" for the full SMB/CIFS recipe and Apple-specific
+      gotchas (short username, no `domain=` line, omit `vers=`).
 - [ ] API bound to `127.0.0.1` (or behind a reverse proxy with TLS).
 - [ ] `/metrics` scraping restricted to internal network.
 - [ ] `sandbox-runtime:latest` pre-pulled at boot.

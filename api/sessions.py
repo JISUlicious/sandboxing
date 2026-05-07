@@ -108,6 +108,12 @@ class SessionService:
             )
             await self.registry.set_container(session_id, container_id)
             await asyncio.to_thread(self.docker.start_container, container_id)
+            # Normalise /workspace ownership inside the container after
+            # start. Host-side chown (in create_volume) may have been
+            # silently rejected by SMB/NFS/FUSE; this in-container
+            # privileged-exec chown updates gVisor's VFS view directly
+            # so the agent is always the workspace owner.
+            await asyncio.to_thread(self.docker.normalize_workspace_perms, container_id)
             await self.registry.transition(session_id, "RUNNING")
         except Exception:
             log.exception("create failed for %s", session_id)

@@ -67,20 +67,55 @@ project_id_for() {
     printf '%s' "$1" | cksum | awk '{print $1 % 2147483647}'
 }
 
+rewrite_projects_file() {
+    # Rewrite /etc/projects, dropping any stale lines for the given
+    # project_id or volume_path, then appending the fresh mapping.
+    # Preserves the inode (truncate + write) so bind-mounted single
+    # files (Compose path: /etc/projects mounted into control-plane)
+    # don't EBUSY on `sed -i`'s rename trick.
+    local pid=$1
+    local vpath=$2
+    local filtered
+    filtered=$(grep -vE "^${pid}:|:${vpath}$" "$PROJECTS_FILE" 2>/dev/null || true)
+    {
+        # Print existing entries (if any) followed by the fresh line.
+        # The `[[ -n ... ]]` guards an empty filtered string from
+        # injecting an empty line at the top.
+        if [[ -n "$filtered" ]]; then
+            printf '%s\n' "$filtered"
+        fi
+        printf '%s:%s\n' "$pid" "$vpath"
+    } > "$PROJECTS_FILE"
+}
+
+remove_from_projects_file() {
+    # Drop any line matching `^<pid>:`. Same inode-preserving truncate
+    # + write pattern as rewrite_projects_file.
+    local pid=$1
+    local filtered
+    filtered=$(grep -vE "^${pid}:" "$PROJECTS_FILE" 2>/dev/null || true)
+    if [[ -n "$filtered" ]]; then
+        printf '%s\n' "$filtered" > "$PROJECTS_FILE"
+    else
+        : > "$PROJECTS_FILE"
+    fi
+}
+
 cmd_setup() {
     require_inputs
     : "${WORKSPACE_MIB:?WORKSPACE_MIB required}"
 
     PROJECT_ID="$(project_id_for "$SESSION_ID")"
 
-    # Ensure /etc/projects exists, then idempotently rewrite the line for
-    # this project / path. No `sudo sed` / `sudo tee` — we're already root.
+    # Ensure /etc/projects exists, then idempotently rewrite the line
+    # for this project / path. NOTE: do NOT use `sed -i` — it works
+    # by writing a temp file and `rename(2)`-ing it over the original,
+    # which fails with EBUSY when /etc/projects is a bind-mounted
+    # single file (the Compose path bind-mounts it into the control-
+    # plane container). Truncate + write preserves the inode the bind
+    # mount is pinned to.
     [[ -f "$PROJECTS_FILE" ]] || : > "$PROJECTS_FILE"
-    sed -i \
-        -e "/^${PROJECT_ID}:/d" \
-        -e "\\|:${VOLUME_PATH}\$|d" \
-        "$PROJECTS_FILE"
-    printf '%s:%s\n' "$PROJECT_ID" "$VOLUME_PATH" >> "$PROJECTS_FILE"
+    rewrite_projects_file "$PROJECT_ID" "$VOLUME_PATH"
 
     # Apply project ID + limit in a single xfs_quota invocation. Two
     # separate `xfs_quota -c` calls have been observed to lose userspace
@@ -128,7 +163,9 @@ cmd_teardown() {
         "$VOLUME_BASE" \
         || true
 
-    sed -i "/^${PROJECT_ID}:/d" "$PROJECTS_FILE" 2>/dev/null || true
+    # Same bind-mount-friendly rewrite as cmd_setup uses; sed -i
+    # would EBUSY on the bind-mounted /etc/projects.
+    remove_from_projects_file "$PROJECT_ID" 2>/dev/null || true
     rm -f "$VOLUME_PATH/.project_id"
 }
 

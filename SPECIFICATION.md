@@ -256,16 +256,34 @@ identifies a tenant.
 
 ## 9. Errors
 
-| Condition                                  | Status | Code                |
-| ------------------------------------------ | ------ | ------------------- |
-| Session not found / not owned / destroyed  | 404    | `session_not_found` |
-| Session in wrong state for op              | 409    | `invalid_state`     |
-| Limit exceeded (concurrent, size, etc.)    | 429    | `limit_exceeded`    |
-| Exec timeout                               | 408    | `exec_timeout`      |
-| Path outside `/workspace`                  | 400    | `invalid_path`      |
-| Forbidden env key, malformed argv, etc.    | 400    | `invalid_argument`  |
-| Auth missing / invalid                     | 401    | `unauthorized`      |
-| Internal (gVisor / docker error)           | 500    | `internal_error`    |
+| Condition                                  | Status | Code                  |
+| ------------------------------------------ | ------ | --------------------- |
+| Session not found / not owned / destroyed  | 404    | `session_not_found`   |
+| Process not found (or already deleted)     | 404    | `process_not_found`   |
+| File not found under `/workspace`          | 404    | `file_not_found`      |
+| Tenant not found (admin API)               | 404    | `tenant_not_found`    |
+| Token not found (admin API)                | 404    | `token_not_found`     |
+| Session in wrong state for op              | 409    | `invalid_state`       |
+| Idempotency-Key replayed against different route | 409 | `idempotency_route_mismatch` |
+| Per-field request limit exceeds tenant cap (SPEC-100) | 400 | `limit_exceeded` |
+| Tenant concurrency / per-session rate cap exceeded | 429 | `limit_exceeded` |
+| Exec timeout                               | 408    | `exec_timeout`        |
+| Path outside `/workspace`                  | 400    | `invalid_path`        |
+| Forbidden env key, malformed argv, etc.    | 400    | `invalid_argument`    |
+| Auth missing / invalid                     | 401    | `unauthorized`        |
+| Forbidden scope                            | 403    | `forbidden_scope`     |
+| Audit log unhealthy (fail-closed)          | 503    | `audit_unhealthy`     |
+| Admin endpoints disabled (no admin token)  | 503    | `admin_disabled`      |
+| Docker image not pulled / unavailable      | 503    | `image_not_found`     |
+| Docker daemon error (other)                | 503    | `docker_api_error`    |
+| Internal (gVisor / unhandled exception)    | 500    | `internal_error`      |
+
+The `limit_exceeded` code intentionally maps to two different status
+codes by design: 400 for "your request body has invalid values"
+(retrying with the same body never succeeds), 429 for "the system is
+saturated; back off and retry" (retrying later might succeed). The
+machine-readable code is the same so existing client code branches
+on `code` rather than HTTP status.
 
 Output that exceeds the 8 MiB per-stream cap is **not** an error: the
 call returns `200` with `truncated: true` and `truncated_streams`

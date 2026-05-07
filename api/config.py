@@ -71,8 +71,9 @@ class Settings(BaseSettings):
     # SPEC-401 — host UID that container UID 10001 maps to under
     # `userns-remap=default`. With it set, per-session bind directories
     # are chown'd to this UID and chmod'd 0700 (no more world-writable
-    # 0777 stopgap). Compute via:
-    #     awk -F: '$1=="dockremap"{print $2 + 10000}' /etc/subuid
+    # 0777 stopgap). Compute via (note +10001 — agent UID is 10001
+    # inside the container, NOT 10000):
+    #     awk -F: '$1=="dockremap"{print $2 + 10001}' /etc/subuid
     # Leave None on dev / non-userns-remap hosts; create_volume falls
     # back to the 0777 mode and warns at startup.
     bind_volume_uid: int | None = None

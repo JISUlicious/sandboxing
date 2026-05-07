@@ -215,13 +215,31 @@ the host and point `SANDBOX_VOLUME_BASE` at a subdirectory.
 
 **SMB / CIFS quick recipe** (the case the user example covered):
 
+> **Apple-served SMB (macOS share-target)** has three gotchas that
+> cost a deploy session:
+>
+> - **Username must be the macOS short account name** (System
+>   Settings → Users & Groups → click user → "Account name" — usually
+>   the lowercased first name, e.g. `jisu`). The display name (`Jisu
+>   Hong`) auth-fails with `STATUS_LOGON_FAILURE` even when the
+>   password is right.
+> - **Do NOT include a `domain=` line in `/etc/cifs.creds`.** Linux's
+>   `cifs-utils` will default it to `WORKGROUP`, which Apple's
+>   smbd rejects.
+> - **Don't pin `vers=` in fstab unless you know the right value.**
+>   `vers=3.0` can fail on current macOS releases; either omit (let
+>   the kernel auto-negotiate) or use `vers=3.1.1`. Add `nounix,
+>   mapposix` since Apple doesn't advertise SMB UNIX extensions.
+
 ```bash
-# 1. Create credentials file (lock down to root).
+# 1. Create credentials file (lock down to root). EXACTLY 2 lines —
+#    no trailing `domain=`, no blank lines.
 sudo tee /etc/cifs.creds >/dev/null <<EOF
-username=YOUR_SMB_USER
+username=YOUR_SMB_SHORT_NAME
 password=YOUR_SMB_PASSWORD
 EOF
 sudo chown root:root /etc/cifs.creds && sudo chmod 0600 /etc/cifs.creds
+sudo wc -l /etc/cifs.creds      # confirm exactly 2 lines
 
 # 2. Compute the dockremap UID once — used both in fstab and env.
 DOCKREMAP_UID=$(awk -F: '$1=="dockremap"{print $2 + 10001}' /etc/subuid)
@@ -246,20 +264,35 @@ echo "use uid=$DOCKREMAP_UID in fstab"
 #        (The control plane now logs a warning + falls back to mode
 #        0o777 when chown fails — but fixing the mount is the right
 #        long-term answer; the 0o777 fallback is purely a safety net.)
+#    `vers=` is intentionally omitted — let the kernel negotiate.
+#    Apple's smbd current (Sequoia+) rejects vers=3.0; setting it
+#    explicitly can break auth on macOS upgrades.
 sudo tee -a /etc/fstab >/dev/null <<EOF
-//smb-server/share /mnt/shared cifs credentials=/etc/cifs.creds,uid=$DOCKREMAP_UID,gid=$DOCKREMAP_UID,forceuid,forcegid,dir_mode=0700,file_mode=0600,_netdev,vers=3.0 0 0
+//smb-server/share /mnt/shared cifs credentials=/etc/cifs.creds,uid=$DOCKREMAP_UID,gid=$DOCKREMAP_UID,forceuid,forcegid,nounix,mapposix,dir_mode=0700,file_mode=0600,_netdev 0 0
 EOF
+
+# 4. ⚠️ Editing fstab does NOT change an already-mounted share.
+#    If you previously mounted with different options, you MUST umount
+#    + remount (or reboot). Linux otherwise silently keeps the old
+#    options live and you debug invisible drift for hours.
+if mount | grep -q /mnt/shared; then
+    sudo umount /mnt/shared
+fi
+sudo systemctl daemon-reload   # systemd caches mount units; reload after fstab edits.
 sudo mount -a
 
-# 4. Verify the mount options actually took effect. Look for
-#    forceuid,forcegid,dir_mode=0700 in the output — Linux silently
-#    drops unknown flags so it pays to confirm.
+# 5. Verify the mount options actually took effect — and verify the
+#    UID is what we wanted, not just "something". Linux silently
+#    drops unknown flags AND ignores trailing-comma options.
 mount | grep /mnt/shared
+mount | grep /mnt/shared | grep -q "uid=$DOCKREMAP_UID,forceuid" \
+    && echo "OK: forceuid+uid=$DOCKREMAP_UID applied" \
+    || { echo "FAIL: mount didn't honor uid/forceuid; check dmesg" >&2; sudo dmesg | tail -20; }
 
-# 5. Create the subdirectory you want to use as the volume base.
+# 6. Create the subdirectory you want to use as the volume base.
 sudo install -d -m 0755 -o root -g root /mnt/shared/data
 
-# 6. Configure /etc/sandbox/env.
+# 7. Configure /etc/sandbox/env.
 sudo tee -a /etc/sandbox/env >/dev/null <<EOF
 
 SANDBOX_VOLUME_BASE=/mnt/shared/data
@@ -267,10 +300,48 @@ SANDBOX_BIND_VOLUME_UID=$DOCKREMAP_UID
 EOF
 sudo chmod 0640 /etc/sandbox/env
 
-# 7. Setup + up. NO --with-xfs-quota.
+# 8. Setup + up. NO --with-xfs-quota.
 sudo deploy/setup-host.sh --full
 docker compose --env-file /etc/sandbox/env up -d
 ```
+
+**Post-deploy preflight** — run this after the stack is up. It catches
+the kind of misconfiguration this recipe is meant to prevent:
+
+```bash
+TOKEN=$(sudo grep -E '^SANDBOX_API_TOKEN=' /etc/sandbox/env | cut -d= -f2)
+
+# Create a throwaway session, check workspace ownership inside the
+# container, then destroy it.
+SID=$(curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+        -H 'Content-Type: application/json' -d '{}' \
+        http://127.0.0.1:8000/v1/sessions | jq -r .session_id)
+docker exec sandbox-$SID stat -c '%u:%g mode=%a' /workspace
+# Expect:  10001:10001 mode=755   (or 700 if dir_mode allows)
+# If you see 65534:65534 (nobody) the agent doesn't own /workspace —
+# the chown didn't reach the underlying fs and v0.1.7's in-container
+# fix isn't running. Check `docker compose logs control-plane | grep workspace`.
+
+# Probe nested-path file write + agent mkdir under /workspace.
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"path":"sub/keep.txt","content_b64":"aGk="}' \
+    http://127.0.0.1:8000/v1/sessions/$SID/files
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"argv":["bash","-lc","mkdir -p deeper && echo OK"]}' \
+    http://127.0.0.1:8000/v1/sessions/$SID/exec
+# Both should return 201 / 200 with exit_code=0.
+
+curl -sS -X DELETE -H "Authorization: Bearer $TOKEN" \
+    http://127.0.0.1:8000/v1/sessions/$SID
+```
+
+> **If you change `SANDBOX_BIND_VOLUME_UID` after sessions exist**, the
+> existing per-session volumes were chowned with the OLD value and
+> stay broken. Either destroy + recreate them via the API, or manually
+> `sudo chown -R <new_uid>:<new_uid> $SANDBOX_VOLUME_BASE/<session_id>`
+> for each (only effective if the underlying fs honors chown — on
+> Apple SMB without forceuid set correctly, it won't, and the right
+> answer is just to `DELETE` the old sessions).
 
 **NFS quick recipe:**
 

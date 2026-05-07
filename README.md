@@ -100,7 +100,7 @@ prefix `SANDBOX_`). On the Compose path these live in
 | Variable | Default | When to override |
 |---|---|---|
 | `SANDBOX_VERSION` | `latest` | Pin a release tag for production so an upstream `:latest` republish doesn't move under you. |
-| `SANDBOX_BIND_VOLUME_UID` | (auto-filled by `setup-host.sh` from `/etc/subuid`) | Set manually if `setup-host.sh` couldn't detect dockremap; computed as `dockremap` subuid start + 10000. SPEC-401 production hardening pivot. |
+| `SANDBOX_BIND_VOLUME_UID` | (auto-filled by `setup-host.sh` from `/etc/subuid`) | Set manually if `setup-host.sh` couldn't detect dockremap; computed as `dockremap` subuid start **+ 10001** (matching the agent's container UID 10001 — NOT 10000). SPEC-401 production hardening pivot. |
 | `SANDBOX_VOLUME_BASE` | `/var/lib/sandbox-volumes` | Relocate workspace bind mounts onto a dedicated big disk. Must be picked **before** the first session — see [DEPLOY.md "Customize the workspace volume path"](./docs/DEPLOY.md). |
 | `SANDBOX_IMAGE_NAMESPACE` | `ghcr.io/jisulicious` | Forks publishing to their own ghcr.io path. |
 | `SANDBOX_TRUST_PROXY_HEADERS` | unset | Enable when behind a TLS-terminating reverse proxy (Caddy / nginx — sample configs in `deploy/tls/`). |

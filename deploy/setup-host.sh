@@ -255,6 +255,37 @@ JSON
 fi
 
 # ---------------------------------------------------------------------
+# 0. Ensure the `sandbox` system user/group exist.
+# Every section below references `sandbox:sandbox` ownership (audit
+# log, env-file perms, sudoers grant). Without this section, fresh
+# Ubuntu hosts following docs/DEPLOY.md hit `install: invalid user
+# 'sandbox'` and `set -e` aborts the run mid-script. Idempotent.
+# ---------------------------------------------------------------------
+echo "0) sandbox system user"
+if getent passwd sandbox >/dev/null 2>&1; then
+    skip "sandbox user already exists"
+else
+    run useradd -r -s /sbin/nologin sandbox
+    ok "sandbox system user created"
+fi
+# Compose-path control plane reads /var/run/docker.sock; the systemd
+# path's hardened unit (deploy/sandbox-api.service) runs as root but
+# the operator user that invokes `docker compose` benefits from
+# being in the docker group too. F1 (--full) creates the docker
+# group; the systemd path's manual Docker install (SETUP.md §1) does
+# the same. If neither has happened yet (e.g. --check before any
+# Docker install), emit a note and continue.
+if ! getent group docker >/dev/null 2>&1; then
+    note "docker group not present yet — install Docker first, then re-run"
+elif id -nG sandbox 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    skip "sandbox already in docker group"
+else
+    run usermod -aG docker sandbox
+    ok "sandbox added to docker group"
+fi
+echo
+
+# ---------------------------------------------------------------------
 # 1. Compute SANDBOX_BIND_VOLUME_UID from /etc/subuid (dockremap line).
 # ---------------------------------------------------------------------
 echo "1) bind-volume UID (SPEC-401)"
@@ -426,14 +457,15 @@ else
         # The user that invoked sudo, NOT root. We want the
         # `usermod -aG sandbox` hint to use their actual login.
         target_user="${SUDO_USER:-$USER}"
+        # Note: the env-file copy + sudoedit are now a PRE-requisite
+        # to running this script (see docs/DEPLOY.md Quick-start).
+        # Without /etc/sandbox/env in place beforehand, sections 1
+        # and 4 above will have printed SKIP — re-create the env
+        # file and re-run the script to pick up auto-derivation +
+        # perm enforcement.
         cat <<NEXT
 
 Next steps:
-  sudo cp deploy/.env.compose.example /etc/sandbox/env
-  sudoedit /etc/sandbox/env             # set SANDBOX_API_TOKEN + _PEPPER
-  sudo chown root:sandbox /etc/sandbox/env
-  sudo chmod 0640 /etc/sandbox/env
-
   # Add yourself to the sandbox group so docker compose can read
   # /etc/sandbox/env without sudo on every invocation.
   sudo usermod -aG sandbox $target_user
@@ -442,6 +474,12 @@ Next steps:
   docker compose --env-file /etc/sandbox/env up -d
   TOKEN=\$(grep API_TOKEN /etc/sandbox/env | cut -d= -f2)
   curl -sS -H "Authorization: Bearer \$TOKEN" http://127.0.0.1:8000/healthz
+
+(Forgot to create /etc/sandbox/env before running this script?
+ sudo install -d -m 0755 /etc/sandbox
+ sudo cp deploy/.env.compose.example /etc/sandbox/env
+ sudoedit /etc/sandbox/env       # set SANDBOX_API_TOKEN + _PEPPER
+ sudo $0 --full $([[ -f /var/lib/sandbox-fs.img ]] && echo --with-xfs-quota))
 NEXT
     else
         echo "Next: sudo systemctl restart sandbox-api"

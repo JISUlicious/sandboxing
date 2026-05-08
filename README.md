@@ -54,18 +54,24 @@ Pulls three published images from `ghcr.io/JISUlicious/sandbox-*`:
 
 ```bash
 git clone https://github.com/JISUlicious/sandboxing && cd sandboxing
-sudo deploy/setup-host.sh --full --with-xfs-quota
+
+# /etc/sandbox/env MUST exist before setup-host.sh runs — the script
+# auto-derives SANDBOX_BIND_VOLUME_UID for THIS host's dockremap range
+# and writes it back into the file. With the file missing, that step
+# is silently skipped and you fall back to the example's hardcoded value.
+sudo install -d -m 0755 /etc/sandbox
 sudo cp deploy/.env.compose.example /etc/sandbox/env
 sudoedit /etc/sandbox/env                # fill in the two required secrets (next subsection)
-sudo chmod 0640 /etc/sandbox/env
+
+sudo deploy/setup-host.sh --full --with-xfs-quota
 sudo docker compose --env-file /etc/sandbox/env up -d
 ```
 
 `setup-host.sh --full` installs Docker, gVisor, daemon.json
-(`userns-remap`), iptables, the `sandbox_egress` network, and the
-slice-9 security hardening — all idempotent, re-run safe. Full
-walkthrough including upgrades / backup / trade-offs:
-[docs/DEPLOY.md](./docs/DEPLOY.md).
+(`userns-remap`), iptables, the `sandbox_egress` network, the
+`sandbox` system user, and the slice-9 security hardening — all
+idempotent, re-run safe. Full walkthrough including upgrades /
+backup / trade-offs: [docs/DEPLOY.md](./docs/DEPLOY.md).
 
 ### Path C — Production via systemd
 

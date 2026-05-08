@@ -186,18 +186,86 @@ if (( FULL )); then
     # three keys we need when they're absent. Backup before write.
     echo "F3) /etc/docker/daemon.json (runsc + userns-remap, merge)"
     install -d -m 0755 /etc/docker
+
+    # ----- F3-pre. Preflight `userns-remap=default` prerequisites -
+    # On a host without these, `systemctl restart docker` after we
+    # add userns-remap to daemon.json fails with cryptic startup
+    # errors. Docker is documented to auto-create dockremap, but in
+    # practice that path is fragile (AppArmor, NSS quirks, partial
+    # state from a previous run). Doing it ourselves up front is
+    # idempotent and removes the failure mode entirely.
+    if ! getent passwd dockremap >/dev/null 2>&1; then
+        run useradd --system --no-create-home --shell /usr/sbin/nologin dockremap
+        ok "dockremap system user created"
+    else
+        skip "dockremap user already present"
+    fi
+    if ! getent group dockremap >/dev/null 2>&1; then
+        run groupadd --system dockremap
+        ok "dockremap system group created"
+    else
+        skip "dockremap group already present"
+    fi
+    # Subuid / subgid: 100000:65536 is the conventional userns range
+    # for non-root users on Debian/Ubuntu. Append only if missing —
+    # never overwrite an operator-chosen range.
+    for f in /etc/subuid /etc/subgid; do
+        if [[ -f "$f" ]] && grep -q '^dockremap:' "$f"; then
+            skip "$f already has dockremap entry"
+        else
+            if (( CHECK_ONLY )); then
+                note "would append 'dockremap:100000:65536' to $f"
+            else
+                # Touch first so the file exists with safe mode if
+                # somehow missing on this host.
+                touch "$f" && chmod 0644 "$f"
+                printf 'dockremap:100000:65536\n' >> "$f"
+                ok "$f appended dockremap:100000:65536"
+            fi
+        fi
+    done
+
     JQ_FILTER='
         .runtimes //= {}
         | .runtimes.runsc //= {"path":"/usr/bin/runsc"}
         | .runtimes."runsc-kvm" //= {"path":"/usr/bin/runsc","runtimeArgs":["--platform=kvm"]}
         | .["userns-remap"] //= "default"
     '
+
+    # Helper: try to restart docker; on failure, restore from
+    # backup (if provided), retry, dump journalctl, and exit. Keeps
+    # the operator's machine reachable instead of leaving Docker
+    # broken with no docker.sock for the rest of the script.
+    restart_docker_safely() {
+        local backup_path="${1:-}"
+        if systemctl restart docker; then
+            return 0
+        fi
+        fail "systemctl restart docker FAILED with new daemon.json"
+        if [[ -n "$backup_path" && -f "$backup_path" ]]; then
+            fail "rolling back $DAEMON_JSON from $backup_path"
+            cp -p "$backup_path" "$DAEMON_JSON"
+        else
+            fail "no prior daemon.json — removing the version we just wrote"
+            rm -f "$DAEMON_JSON"
+        fi
+        if systemctl restart docker; then
+            fail "rollback succeeded; docker is running with previous config"
+        else
+            fail "rollback ALSO failed; docker remains broken"
+        fi
+        fail "last 30 lines of 'journalctl -u docker':"
+        journalctl -u docker --since "1 minute ago" --no-pager 2>/dev/null \
+            | tail -30 >&2 || true
+        exit 1
+    }
+
     if [[ ! -f "$DAEMON_JSON" ]]; then
         if (( CHECK_ONLY )); then
             note "would write $DAEMON_JSON with runsc + userns-remap=default"
         else
             echo '{}' | jq "$JQ_FILTER" > "$DAEMON_JSON"
-            systemctl restart docker
+            restart_docker_safely ""
             ok "$DAEMON_JSON written; docker restarted"
         fi
     elif ! jq -e . "$DAEMON_JSON" >/dev/null 2>&1; then
@@ -214,12 +282,13 @@ if (( FULL )); then
             if (( CHECK_ONLY )); then
                 note "would merge runsc + userns-remap into $DAEMON_JSON (preserving operator settings)"
             else
-                # Backup before write so the operator can roll back if
-                # the merge had unintended effects.
+                # Backup before write so we can roll back on a failed
+                # docker restart (and so the operator has a manual
+                # rollback path even if the script itself succeeds).
                 backup="$DAEMON_JSON.bak.$(date +%s)"
                 cp -p "$DAEMON_JSON" "$backup"
                 printf '%s\n' "$merged" > "$DAEMON_JSON"
-                systemctl restart docker
+                restart_docker_safely "$backup"
                 ok "$DAEMON_JSON merged (backup: $backup); docker restarted"
             fi
         fi

@@ -17,13 +17,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # ----- system packages -----
 # Read the apt list from system-packages.txt so this Dockerfile and
-# the install set stay in sync without duplication. `xargs -a` skips
-# blank lines + comments via `grep -v` first.
+# the install set stay in sync without duplication. The `grep -v`
+# pair drops blank lines and comments before xargs feeds the names
+# to `apt-get install` (apt-get update doesn't take package names —
+# v0.2.0 had this wrong and failed in CI).
 COPY system-packages.txt /tmp/system-packages.txt
-RUN grep -v '^\s*#' /tmp/system-packages.txt | grep -v '^\s*$' \
-    | xargs apt-get update \
+RUN apt-get update \
     && grep -v '^\s*#' /tmp/system-packages.txt | grep -v '^\s*$' \
-    | xargs apt-get install -y --no-install-recommends \
+       | xargs apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /tmp/system-packages.txt
 
 # ----- Python venv at /opt/ds-venv -----

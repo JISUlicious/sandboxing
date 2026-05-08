@@ -11,7 +11,7 @@ curl
 procps
 less
 tini
-libomp1
+libgomp1
 ghostscript
 libreoffice-core
 libreoffice-writer

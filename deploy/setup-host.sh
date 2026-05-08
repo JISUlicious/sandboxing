@@ -206,24 +206,80 @@ if (( FULL )); then
     else
         skip "dockremap group already present"
     fi
-    # Subuid / subgid: 100000:65536 is the conventional userns range
-    # for non-root users on Debian/Ubuntu. Append only if missing —
-    # never overwrite an operator-chosen range.
-    for f in /etc/subuid /etc/subgid; do
-        if [[ -f "$f" ]] && grep -q '^dockremap:' "$f"; then
-            skip "$f already has dockremap entry"
-        else
-            if (( CHECK_ONLY )); then
-                note "would append 'dockremap:100000:65536' to $f"
-            else
-                # Touch first so the file exists with safe mode if
-                # somehow missing on this host.
-                touch "$f" && chmod 0644 "$f"
-                printf 'dockremap:100000:65536\n' >> "$f"
-                ok "$f appended dockremap:100000:65536"
-            fi
+    # Subuid / subgid: ensure dockremap has a 65536-UID range, but
+    # don't hardcode 100000:65536 — that range may already be in use
+    # by another user on a multi-tenant host, and appending an
+    # overlapping entry makes Docker reject the config at startup.
+    #
+    # Three-tier strategy, in order:
+    #   1. If dockremap already has an entry, leave it (never overwrite).
+    #   2. Else try `usermod --add-subuids/--add-subgids` (shadow 4.5+
+    #      auto-finds a free range using SUB_UID_MIN/MAX in login.defs).
+    #   3. Else fall back to scan-and-append: find the highest existing
+    #      end-of-range and allocate the next 65536 slots.
+    ensure_dockremap_subid() {
+        local file=$1   # /etc/subuid or /etc/subgid
+        local kind=$2   # "subuid" or "subgid"
+        local flag=$3   # --add-subuids / --add-subgids
+        if [[ -f "$file" ]] && grep -q '^dockremap:' "$file"; then
+            skip "$file already has dockremap entry ($(grep '^dockremap:' "$file" | head -n1))"
+            return 0
         fi
-    done
+        if (( CHECK_ONLY )); then
+            note "would allocate a free 65536 range for dockremap in $file"
+            return 0
+        fi
+        # File may be missing on minimal images; create with safe mode.
+        touch "$file" && chmod 0644 "$file"
+        # Tier 2: let usermod pick a free range (preferred — respects
+        # /etc/login.defs SUB_UID_MIN/MAX). Only present in shadow >=4.5.
+        if usermod --help 2>&1 | grep -q -- "$flag" \
+            && usermod "$flag" 100000-165535 dockremap >/dev/null 2>&1 \
+            && grep -q '^dockremap:' "$file"; then
+            ok "$file: dockremap range allocated via usermod $flag ($(grep '^dockremap:' "$file" | head -n1))"
+            return 0
+        fi
+        # Tier 3: scan + append at next free slot. Find the highest
+        # used end-of-range across the file; start ours one above
+        # 100000 OR one above the highest in use, whichever is bigger.
+        local max_end
+        max_end=$(awk -F: 'NF>=3 { e = $2 + $3; if (e > m) m = e } END { print m+0 }' "$file")
+        local start=$(( max_end < 100000 ? 100000 : max_end ))
+        printf 'dockremap:%d:65536\n' "$start" >> "$file"
+        ok "$file: appended dockremap:$start:65536 (scanned-fallback; max prior end was $max_end)"
+    }
+    ensure_dockremap_subid /etc/subuid subuid --add-subuids
+    ensure_dockremap_subid /etc/subgid subgid --add-subgids
+
+    # Warn loudly if the host has existing non-userns Docker state
+    # that's about to become orphaned. Activating userns-remap=default
+    # makes Docker create a separate /var/lib/docker/<dockremap-uid>.<gid>/
+    # state directory and STOP using the existing /var/lib/docker/
+    # contents. Old containers, images, and volumes don't disappear,
+    # but they become inaccessible via the new daemon. This is
+    # silent on the operator-side without this warning.
+    if [[ -f "$DAEMON_JSON" ]] && grep -q '"userns-remap"' "$DAEMON_JSON" 2>/dev/null; then
+        : # already userns-remapped; not a fresh activation.
+    elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        existing_containers=$(docker ps -aq 2>/dev/null | wc -l)
+        existing_images=$(docker images -q 2>/dev/null | wc -l)
+        if (( existing_containers > 0 || existing_images > 0 )); then
+            note "==============================================================="
+            note "WARNING: enabling userns-remap will orphan existing Docker state"
+            note "  containers: $existing_containers   images: $existing_images"
+            note "  Once userns-remap=default is active, Docker uses a separate"
+            note "  state dir under /var/lib/docker/<dockremap-uid>.<gid>/. Your"
+            note "  existing containers + images stay on disk but become"
+            note "  inaccessible via the new daemon."
+            note ""
+            note "  If those workloads matter, abort now (Ctrl-C) and either:"
+            note "    - export them first (\`docker save\` / \`docker commit\`)"
+            note "    - or skip userns-remap by editing $DAEMON_JSON manually"
+            note "      AFTER this script runs (the merge is idempotent)."
+            note "==============================================================="
+            sleep 3   # brief pause so the operator notices in interactive runs
+        fi
+    fi
 
     JQ_FILTER='
         .runtimes //= {}
@@ -314,13 +370,28 @@ if (( FULL )); then
                 ok "created $XFS_IMG ($XFS_SIZE_GB GiB)"
             fi
             # Persist the mount via /etc/fstab so reboots restore it.
-            if ! grep -q "$XFS_IMG" /etc/fstab 2>/dev/null; then
-                if (( CHECK_ONLY )); then
-                    note "would append fstab entry for $XFS_IMG"
-                else
-                    printf '%s %s xfs loop,prjquota,defaults 0 2\n' \
-                        "$XFS_IMG" "$XFS_MOUNT" >> /etc/fstab
-                fi
+            # Two-axis check: skip if our $XFS_IMG is already in fstab
+            # (idempotent re-run), but FAIL if a *different* fs is
+            # already mounted at $XFS_MOUNT — appending in that case
+            # would create duplicate fstab entries for the same target
+            # and confuse mount(8) at boot.
+            if grep -q "$XFS_IMG" /etc/fstab 2>/dev/null; then
+                skip "$XFS_IMG already in /etc/fstab"
+            elif awk -v m="$XFS_MOUNT" '
+                    /^[[:space:]]*#/ { next }
+                    NF >= 2 && $2 == m { found=1; exit }
+                    END { exit !found }
+                ' /etc/fstab 2>/dev/null; then
+                fail "$XFS_MOUNT already has a fstab entry from a different source"
+                fail "either remove the existing /etc/fstab line or pick a different SANDBOX_VOLUME_BASE"
+                fail "(don't want to silently shadow your mount with our loopback XFS)"
+                exit 1
+            elif (( CHECK_ONLY )); then
+                note "would append fstab entry for $XFS_IMG → $XFS_MOUNT"
+            else
+                printf '%s %s xfs loop,prjquota,defaults 0 2\n' \
+                    "$XFS_IMG" "$XFS_MOUNT" >> /etc/fstab
+                ok "fstab appended: $XFS_IMG → $XFS_MOUNT"
             fi
             run mount "$XFS_MOUNT"
             ok "mounted $XFS_IMG on $XFS_MOUNT"

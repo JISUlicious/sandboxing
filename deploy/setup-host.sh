@@ -119,16 +119,21 @@ if (( FULL )); then
         exit 1
     fi
 
-    # ---- F1. Docker Engine + compose plugin -----------------------
-    echo "F1) Docker Engine + compose plugin"
-    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-        skip "docker + compose already installed ($(docker --version | cut -d, -f1))"
+    # ---- F1. Docker Engine + compose plugin + jq ------------------
+    # jq is needed by F3's daemon.json merge logic (preserve operator
+    # settings; only add what's missing). Bundling it here so F3
+    # doesn't have to apt-install partway through.
+    echo "F1) Docker Engine + compose plugin + jq"
+    if command -v docker >/dev/null 2>&1 \
+        && docker compose version >/dev/null 2>&1 \
+        && command -v jq >/dev/null 2>&1; then
+        skip "docker + compose + jq already installed ($(docker --version | cut -d, -f1))"
     else
         run apt-get update -qq
         run apt-get install -y --no-install-recommends \
-            ca-certificates curl docker.io docker-compose-plugin
+            ca-certificates curl docker.io docker-compose-plugin jq
         run systemctl enable --now docker
-        ok "Docker Engine installed + enabled"
+        ok "Docker Engine + jq installed + enabled"
     fi
     echo
 
@@ -154,32 +159,52 @@ if (( FULL )); then
     fi
     echo
 
-    # ---- F3. /etc/docker/daemon.json -----------------------------
-    echo "F3) /etc/docker/daemon.json (runsc + userns-remap)"
-    if [[ -f $DAEMON_JSON ]] \
-       && grep -q '"runsc"' "$DAEMON_JSON" 2>/dev/null \
-       && grep -q '"userns-remap"' "$DAEMON_JSON" 2>/dev/null; then
-        skip "$DAEMON_JSON already has runsc + userns-remap"
-    else
+    # ---- F3. /etc/docker/daemon.json (jq-merge, never overwrite) -
+    # The previous implementation cat-overwrote daemon.json when the
+    # `"runsc"` or `"userns-remap"` markers were missing — losing any
+    # operator-set keys (log-driver, mtu, registry-mirrors, custom
+    # runtimes like nvidia, etc.) silently. Now: jq-merge with `//=`
+    # (assign-if-missing). Operator-set values WIN; we only add the
+    # three keys we need when they're absent. Backup before write.
+    echo "F3) /etc/docker/daemon.json (runsc + userns-remap, merge)"
+    install -d -m 0755 /etc/docker
+    JQ_FILTER='
+        .runtimes //= {}
+        | .runtimes.runsc //= {"path":"/usr/bin/runsc"}
+        | .runtimes."runsc-kvm" //= {"path":"/usr/bin/runsc","runtimeArgs":["--platform=kvm"]}
+        | .["userns-remap"] //= "default"
+    '
+    if [[ ! -f "$DAEMON_JSON" ]]; then
         if (( CHECK_ONLY )); then
             note "would write $DAEMON_JSON with runsc + userns-remap=default"
         else
-            install -d -m 0755 /etc/docker
-            cat > "$DAEMON_JSON" <<'JSON'
-{
-  "runtimes": {
-    "runsc": { "path": "/usr/bin/runsc" },
-    "runsc-kvm": {
-      "path": "/usr/bin/runsc",
-      "runtimeArgs": ["--platform=kvm"]
-    }
-  },
-  "userns-remap": "default"
-}
-JSON
+            echo '{}' | jq "$JQ_FILTER" > "$DAEMON_JSON"
             systemctl restart docker
+            ok "$DAEMON_JSON written; docker restarted"
         fi
-        ok "$DAEMON_JSON written; docker restarted"
+    elif ! jq -e . "$DAEMON_JSON" >/dev/null 2>&1; then
+        fail "$DAEMON_JSON exists but is not valid JSON; refusing to modify"
+        fail "fix or remove it manually, then re-run setup-host.sh"
+        exit 1
+    else
+        existing_canon=$(jq -S . "$DAEMON_JSON")
+        merged=$(jq "$JQ_FILTER" "$DAEMON_JSON")
+        merged_canon=$(echo "$merged" | jq -S .)
+        if [[ "$existing_canon" == "$merged_canon" ]]; then
+            skip "$DAEMON_JSON already has runsc + userns-remap"
+        else
+            if (( CHECK_ONLY )); then
+                note "would merge runsc + userns-remap into $DAEMON_JSON (preserving operator settings)"
+            else
+                # Backup before write so the operator can roll back if
+                # the merge had unintended effects.
+                backup="$DAEMON_JSON.bak.$(date +%s)"
+                cp -p "$DAEMON_JSON" "$backup"
+                printf '%s\n' "$merged" > "$DAEMON_JSON"
+                systemctl restart docker
+                ok "$DAEMON_JSON merged (backup: $backup); docker restarted"
+            fi
+        fi
     fi
     # Ensure /etc/projects exists so compose's :rw bind has a target.
     if [[ ! -f /etc/projects ]]; then

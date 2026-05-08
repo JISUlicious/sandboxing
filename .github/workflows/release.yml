@@ -20,6 +20,9 @@ jobs:
           - image: runtime
             context: sandbox
             dockerfile: sandbox/Dockerfile
+          - image: runtime-ds
+            context: sandbox/ds
+            dockerfile: sandbox/ds/Dockerfile
           - image: proxy
             context: proxy
             dockerfile: proxy/Dockerfile
@@ -96,11 +99,18 @@ jobs:
 
             ```
             ghcr.io/${{ steps.repo.outputs.owner_lc }}/sandbox-runtime:${{ github.ref_name }}
+            ghcr.io/${{ steps.repo.outputs.owner_lc }}/sandbox-runtime-ds:${{ github.ref_name }}
             ghcr.io/${{ steps.repo.outputs.owner_lc }}/sandbox-proxy:${{ github.ref_name }}
             ghcr.io/${{ steps.repo.outputs.owner_lc }}/sandbox-control-plane:${{ github.ref_name }}
             ```
 
             Same images are also published as `:latest`.
+
+            `sandbox-runtime` is the default minimal image; `-ds`
+            preloads the data-science / ML / document-generation
+            stack. Operators select via `SANDBOX_SANDBOX_IMAGE` in
+            `/etc/sandbox/env` — see
+            [docs/DEPLOY.md "Choosing the runtime image"](./docs/DEPLOY.md).
 
             ## Quick-start
 

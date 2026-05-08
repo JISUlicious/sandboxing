@@ -1,0 +1,42 @@
+# Sandbox-runtime-ds Python dependencies. Pinned with floor versions so
+# the image stays reproducible per release tag. See sandbox/ds/README.md
+# for what each block covers.
+
+# pd-skills + general DS core (pandas >= 2.3 per pd-skills SKILL.md).
+pandas>=2.3,<3
+numpy>=2.0,<3
+scipy>=1.13
+pyarrow>=17
+plotly>=5.24
+kaleido>=0.2
+matplotlib>=3.9
+seaborn>=0.13
+scikit-learn>=1.5
+xgboost>=2.1
+catboost>=1.2
+shap>=0.46
+umap-learn>=0.5
+statsmodels>=0.14
+ruptures>=1.1
+mlxtend>=0.23
+numba>=0.60
+
+# Heavyweight optionals — pd-skills' RCA + scale-out modules reference these.
+dowhy>=0.11
+econml>=0.15
+dask[complete]>=2024.8
+
+# Data IO.
+openpyxl>=3.1
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+adbc-driver-postgresql>=1.2
+lxml>=5.3
+
+# Anthropic skills (pptx / xlsx / docx). xlsx is pure Python (openpyxl
+# above + LibreOffice for formula recalc). pptx/docx Node deps live in
+# package.json.
+markitdown>=0.1
+python-pptx>=1.0
+python-docx>=1.1
+pillow>=10

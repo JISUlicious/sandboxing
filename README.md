@@ -106,6 +106,7 @@ prefix `SANDBOX_`). On the Compose path these live in
 | Variable | Default | When to override |
 |---|---|---|
 | `SANDBOX_VERSION` | `latest` | Pin a release tag for production so an upstream `:latest` republish doesn't move under you. |
+| `SANDBOX_SANDBOX_IMAGE` | (constructed from the namespace + `sandbox-runtime` + version) | Switch to the data-science variant: `ghcr.io/jisulicious/sandbox-runtime-ds:<tag>`. ~5–7 GiB image preloaded with pandas / numpy / sklearn / xgboost / catboost / shap / umap-learn / plotly / matplotlib / seaborn / statsmodels / dowhy / econml / dask plus pptxgenjs / docx (Node) and LibreOffice + pandoc for Anthropic's pptx/xlsx/docx skills. See [DEPLOY.md "Choosing the runtime image"](./docs/DEPLOY.md). |
 | `SANDBOX_BIND_VOLUME_UID` | (auto-filled by `setup-host.sh` from `/etc/subuid`) | Set manually if `setup-host.sh` couldn't detect dockremap; computed as `dockremap` subuid start **+ 10001** (matching the agent's container UID 10001 — NOT 10000). SPEC-401 production hardening pivot. |
 | `SANDBOX_VOLUME_BASE` | `/var/lib/sandbox-volumes` | Relocate workspace bind mounts onto a dedicated big disk. Must be picked **before** the first session — see [DEPLOY.md "Customize the workspace volume path"](./docs/DEPLOY.md). |
 | `SANDBOX_IMAGE_NAMESPACE` | `ghcr.io/jisulicious` | Forks publishing to their own ghcr.io path. |

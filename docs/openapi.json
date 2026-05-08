@@ -947,7 +947,7 @@
   "info": {
     "description": "\nControl plane for an LLM-agent sandbox service. See\n[SPECIFICATION.md](https://github.com/JISUlicious/sandboxing/blob/main/SPECIFICATION.md)\nand\n[ARCHITECTURE.md](https://github.com/JISUlicious/sandboxing/blob/main/ARCHITECTURE.md)\nfor the full contract.\n\nEvery session is a long-lived, hardened container. Filesystem state in\n`/workspace` persists across exec calls and across stop/resume; process\nstate does not (SPEC-002). All endpoints under `/v1/sessions` require a\nbearer token in the `Authorization` header.\n",
     "title": "Sandbox Service",
-    "version": "0.2.2"
+    "version": "0.2.3"
   },
   "openapi": "3.1.0",
   "paths": {

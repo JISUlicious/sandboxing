@@ -78,11 +78,15 @@ SUBNET="${SANDBOX_SUBNET:-172.30.0.0/24}"
 CHECK_ONLY=0
 FULL=0
 WITH_XFS=0
+NO_USERNS_REMAP=0
+REMOVE_USERNS_REMAP=0
 for arg in "$@"; do
     case "$arg" in
-        --check)          CHECK_ONLY=1 ;;
-        --full)           FULL=1 ;;
-        --with-xfs-quota) WITH_XFS=1 ;;
+        --check)              CHECK_ONLY=1 ;;
+        --full)               FULL=1 ;;
+        --with-xfs-quota)     WITH_XFS=1 ;;
+        --no-userns-remap)    NO_USERNS_REMAP=1 ;;
+        --remove-userns-remap) REMOVE_USERNS_REMAP=1 ;;
         -h|--help)
             sed -n '2,/^$/p' "$0" | head -n 35 | sed 's/^# \{0,1\}//'
             exit 0
@@ -90,6 +94,14 @@ for arg in "$@"; do
         *) echo "unknown flag: $arg" >&2; exit 2 ;;
     esac
 done
+
+# --no-userns-remap and --remove-userns-remap are mutually compatible
+# but conceptually different: --no-userns-remap means "going forward,
+# don't ADD userns-remap to daemon.json"; --remove-userns-remap means
+# "actively REMOVE it from an existing daemon.json (and update the
+# env file's SANDBOX_BIND_VOLUME_UID accordingly)". Setting both
+# implies the operator definitively wants no userns-remap on this
+# host — same effect as either flag alone for the F3 logic.
 
 if [[ $EUID -ne 0 ]]; then
     echo "ERROR: must run as root (sudo $0)" >&2
@@ -184,7 +196,16 @@ if (( FULL )); then
     # runtimes like nvidia, etc.) silently. Now: jq-merge with `//=`
     # (assign-if-missing). Operator-set values WIN; we only add the
     # three keys we need when they're absent. Backup before write.
-    echo "F3) /etc/docker/daemon.json (runsc + userns-remap, merge)"
+    if (( NO_USERNS_REMAP )); then
+        echo "F3) /etc/docker/daemon.json (runsc only — userns-remap skipped per --no-userns-remap)"
+        note "userns-remap=default not added to daemon.json this run."
+        note "Defense-in-depth layer is skipped; gVisor + cap_drop + non-root"
+        note "agent + read-only fs remain as the primary isolation. See"
+        note "docs/DEPLOY.md 'Choosing the userns-remap posture' for the"
+        note "trade-off."
+    else
+        echo "F3) /etc/docker/daemon.json (runsc + userns-remap, merge)"
+    fi
     install -d -m 0755 /etc/docker
 
     # ----- F3-pre. Preflight `userns-remap=default` prerequisites -
@@ -194,6 +215,11 @@ if (( FULL )); then
     # practice that path is fragile (AppArmor, NSS quirks, partial
     # state from a previous run). Doing it ourselves up front is
     # idempotent and removes the failure mode entirely.
+    #
+    # Skipped entirely when --no-userns-remap is passed (operator
+    # has decided not to add the userns-remap layer; the dockremap
+    # user/subuid pre-flight is then irrelevant).
+    if (( ! NO_USERNS_REMAP )); then
     if ! getent passwd dockremap >/dev/null 2>&1; then
         run useradd --system --no-create-home --shell /usr/sbin/nologin dockremap
         ok "dockremap system user created"
@@ -251,6 +277,73 @@ if (( FULL )); then
     ensure_dockremap_subid /etc/subuid subuid --add-subuids
     ensure_dockremap_subid /etc/subgid subgid --add-subgids
 
+    # ----- F3-pre Check 3. Graphroot accessibility for dockremap UID
+    # Activating userns-remap fails at restart if dockerd's data-root
+    # path isn't traversable by the dockremap UID. Common cause:
+    # operator set data-root to a path under /home/<user>/, where
+    # /home/<user>/ is mode 0750 and excludes UID dockremap_start
+    # from traversal. Walk the path and report unwalkable components
+    # BEFORE we touch daemon.json, so the operator gets an actionable
+    # diagnostic instead of "docker.service failed to start".
+    DATA_ROOT=$(jq -r '."data-root" // "/var/lib/docker"' "$DAEMON_JSON" 2>/dev/null \
+        || echo /var/lib/docker)
+    SUBUID_START=$(awk -F: '$1=="dockremap"{print $2; exit}' /etc/subuid)
+    unwalkable=()
+    walk="$DATA_ROOT"
+    while [[ "$walk" != "/" && -n "$walk" ]]; do
+        if [[ -d "$walk" ]]; then
+            walk_perms=$(stat -c '%a' "$walk")
+            walk_other_digit=${walk_perms: -1}
+            if (( (walk_other_digit & 1) == 0 )); then
+                unwalkable+=("$walk (mode $walk_perms — needs o+x)")
+            fi
+        fi
+        walk=$(dirname "$walk")
+    done
+    if (( ${#unwalkable[@]} > 0 )); then
+        fail "userns-remap=default cannot activate: dockremap UID $SUBUID_START"
+        fail "  cannot traverse to data-root '$DATA_ROOT'."
+        fail ""
+        fail "  Path components missing o+x:"
+        for p in "${unwalkable[@]}"; do
+            fail "    $p"
+        done
+        fail ""
+        if [[ "$DATA_ROOT" == /home/* ]]; then
+            fail "  Recommended fix (production posture): bind-mount /var/lib/docker"
+            fail "  to your storage location so the standard data-root path is used:"
+            fail "    sudo systemctl stop docker"
+            fail "    sudo install -d -m 0711 -o root -g root /var/lib/docker"
+            fail "    sudo rsync -aHAX $DATA_ROOT/ /var/lib/docker/   # if there's existing state"
+            fail "    sudo mount --bind $DATA_ROOT /var/lib/docker"
+            fail "    echo \"$DATA_ROOT /var/lib/docker none bind 0 0\" | sudo tee -a /etc/fstab"
+            fail "    sudo jq 'del(.\"data-root\")' $DAEMON_JSON | sudo tee $DAEMON_JSON.new >/dev/null"
+            fail "    sudo mv $DAEMON_JSON.new $DAEMON_JSON"
+            fail "  Then re-run setup-host.sh."
+            fail ""
+            fail "  Alternative for dev/test only: chmod o+x on each path component above"
+            fail "  (loosens home-dir traversal — not recommended for production)."
+        else
+            fail "  Recommended fix: chmod 0711 on the unwalkable path components."
+            fail "  Each step adds traverse-only permission for 'others' without"
+            fail "  exposing directory contents."
+        fi
+        fail ""
+        fail "  Or: re-run setup-host.sh with --no-userns-remap to skip this layer"
+        fail "  entirely. See docs/DEPLOY.md 'Choosing the userns-remap posture' for"
+        fail "  the security trade-off."
+        exit 1
+    fi
+    # Also detect + warn about stale <uid>.<gid> subdirs from
+    # earlier failed attempts. These can prevent docker from
+    # starting cleanly even after the perm issue is fixed.
+    stale="$DATA_ROOT/$SUBUID_START.$SUBUID_START"
+    if [[ -d "$stale" ]]; then
+        note "stale userns subdir from previous attempt: $stale"
+        note "  ownership: $(stat -c '%U:%G mode=%a' "$stale" 2>/dev/null)"
+        note "  if docker still won't start: sudo rm -rf '$stale' (then retry)"
+    fi
+
     # Warn loudly if the host has existing non-userns Docker state
     # that's about to become orphaned. Activating userns-remap=default
     # makes Docker create a separate /var/lib/docker/<dockremap-uid>.<gid>/
@@ -280,13 +373,34 @@ if (( FULL )); then
             sleep 3   # brief pause so the operator notices in interactive runs
         fi
     fi
+    fi   # end of `if (( ! NO_USERNS_REMAP ))`
 
-    JQ_FILTER='
-        .runtimes //= {}
-        | .runtimes.runsc //= {"path":"/usr/bin/runsc"}
-        | .runtimes."runsc-kvm" //= {"path":"/usr/bin/runsc","runtimeArgs":["--platform=kvm"]}
-        | .["userns-remap"] //= "default"
-    '
+    # JQ_FILTER varies by --no-userns-remap. With it, we still ensure
+    # the runsc + runsc-kvm runtimes are registered (they're needed
+    # for the sandbox per-session containers) but DON'T add the
+    # userns-remap key. With --remove-userns-remap, also strip the
+    # key from any existing daemon.json.
+    if (( REMOVE_USERNS_REMAP )); then
+        JQ_FILTER='
+            .runtimes //= {}
+            | .runtimes.runsc //= {"path":"/usr/bin/runsc"}
+            | .runtimes."runsc-kvm" //= {"path":"/usr/bin/runsc","runtimeArgs":["--platform=kvm"]}
+            | del(.["userns-remap"])
+        '
+    elif (( NO_USERNS_REMAP )); then
+        JQ_FILTER='
+            .runtimes //= {}
+            | .runtimes.runsc //= {"path":"/usr/bin/runsc"}
+            | .runtimes."runsc-kvm" //= {"path":"/usr/bin/runsc","runtimeArgs":["--platform=kvm"]}
+        '
+    else
+        JQ_FILTER='
+            .runtimes //= {}
+            | .runtimes.runsc //= {"path":"/usr/bin/runsc"}
+            | .runtimes."runsc-kvm" //= {"path":"/usr/bin/runsc","runtimeArgs":["--platform=kvm"]}
+            | .["userns-remap"] //= "default"
+        '
+    fi
 
     # Helper: try to restart docker; on failure, restore from
     # backup (if provided), retry, dump journalctl, and exit. Keeps
@@ -469,12 +583,20 @@ fi
 echo
 
 # ---------------------------------------------------------------------
-# 1. Compute SANDBOX_BIND_VOLUME_UID from /etc/subuid (dockremap line).
+# 1. Compute SANDBOX_BIND_VOLUME_UID
 # ---------------------------------------------------------------------
+# WITH userns-remap=default: container UID 10001 (agent) maps via the
+# dockremap subuid range to host UID dockremap_start+10001.
+# WITHOUT userns-remap: container UID 10001 IS host UID 10001 directly
+# (no namespace translation).
 echo "1) bind-volume UID (SPEC-401)"
-if ! getent passwd dockremap >/dev/null 2>&1; then
+if (( NO_USERNS_REMAP || REMOVE_USERNS_REMAP )); then
+    BIND_UID=10001
+    note "userns-remap not in use → container UID 10001 == host UID 10001 (BIND_UID=$BIND_UID)"
+elif ! getent passwd dockremap >/dev/null 2>&1; then
     skip "dockremap user missing — userns-remap not configured?"
     skip "follow docs/SETUP.md §3 to set up userns-remap=default"
+    BIND_UID=""
 elif [[ ! -f /etc/subuid ]]; then
     fail "/etc/subuid not found"
     exit 1
@@ -491,6 +613,10 @@ else
     # the agent unable to mkdir under /workspace.)
     BIND_UID=$((DOCKREMAP_START + 10001))
     note "dockremap subuid range starts at $DOCKREMAP_START → container UID 10001 → host UID $BIND_UID"
+fi
+# Common write-to-env-file path. Wrapped in a brace so we can dedent
+# after the if/elif/else above.
+if [[ -n "$BIND_UID" ]]; then
 
     if [[ -f "$ENV_FILE" ]] && grep -q '^SANDBOX_BIND_VOLUME_UID=' "$ENV_FILE"; then
         # Extract digits only — strips inline comments / trailing

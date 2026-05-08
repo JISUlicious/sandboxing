@@ -138,20 +138,38 @@ if (( FULL )); then
     echo
 
     # ---- F2. gVisor (runsc) --------------------------------------
+    # Append-only on gvisor.list: never overwrite. Operators may have
+    # added comments, alternative URLs, or pinned a release branch
+    # other than `release`; we only add the canonical line if the
+    # gVisor URL isn't already present anywhere in the file.
+    GVISOR_LIST=/etc/apt/sources.list.d/gvisor.list
+    GVISOR_KEYRING=/etc/apt/keyrings/gvisor-archive-keyring.gpg
     echo "F2) gVisor (runsc)"
     if command -v runsc >/dev/null 2>&1; then
         skip "runsc already installed ($(runsc --version 2>&1 | head -n1))"
     else
         run install -d -m 0755 /etc/apt/keyrings
-        # Use the canonical gVisor key + repo (per docs/SETUP.md §2).
         if (( ! CHECK_ONLY )); then
-            curl -fsSL https://gvisor.dev/archive.key \
-                | gpg --dearmor -o /etc/apt/keyrings/gvisor-archive-keyring.gpg
+            if [[ ! -f "$GVISOR_KEYRING" ]]; then
+                curl -fsSL https://gvisor.dev/archive.key \
+                    | gpg --dearmor -o "$GVISOR_KEYRING"
+                ok "$GVISOR_KEYRING written"
+            else
+                skip "$GVISOR_KEYRING already present"
+            fi
             arch=$(dpkg --print-architecture)
-            echo "deb [arch=$arch signed-by=/etc/apt/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
-                > /etc/apt/sources.list.d/gvisor.list
+            gvisor_line="deb [arch=$arch signed-by=$GVISOR_KEYRING] https://storage.googleapis.com/gvisor/releases release main"
+            if [[ -f "$GVISOR_LIST" ]] \
+                && grep -qF 'storage.googleapis.com/gvisor/releases' "$GVISOR_LIST" 2>/dev/null; then
+                skip "$GVISOR_LIST already references gvisor releases"
+            else
+                # Append; never overwrite. If file is missing, this
+                # creates it with one line.
+                printf '%s\n' "$gvisor_line" >> "$GVISOR_LIST"
+                ok "$GVISOR_LIST appended ($gvisor_line)"
+            fi
         else
-            note "would install gvisor key + repo"
+            note "would install gvisor key + apt source"
         fi
         run apt-get update -qq
         run apt-get install -y --no-install-recommends runsc
@@ -335,12 +353,20 @@ else
     note "dockremap subuid range starts at $DOCKREMAP_START → container UID 10001 → host UID $BIND_UID"
 
     if [[ -f "$ENV_FILE" ]] && grep -q '^SANDBOX_BIND_VOLUME_UID=' "$ENV_FILE"; then
-        existing=$(awk -F= '$1=="SANDBOX_BIND_VOLUME_UID"{print $2}' "$ENV_FILE")
+        # Extract digits only — strips inline comments / trailing
+        # whitespace so the comparison is value-only. `split($2, a,
+        # /[^0-9]/)` puts the leading digits in a[1].
+        existing=$(awk -F= '
+            $1=="SANDBOX_BIND_VOLUME_UID"{ split($2, a, /[^0-9]/); print a[1]; exit }
+        ' "$ENV_FILE")
         if [[ "$existing" == "$BIND_UID" ]]; then
             skip "SANDBOX_BIND_VOLUME_UID already set to $BIND_UID"
         else
             note "updating SANDBOX_BIND_VOLUME_UID: $existing → $BIND_UID"
-            run sed -i "s|^SANDBOX_BIND_VOLUME_UID=.*|SANDBOX_BIND_VOLUME_UID=$BIND_UID|" "$ENV_FILE"
+            # Match digits ONLY in the right-hand side; leave inline
+            # comments / extra whitespace intact. Pre-v0.2.4 used `.*`
+            # which greedily ate trailing comments.
+            run sed -i -E "s|^(SANDBOX_BIND_VOLUME_UID=)[0-9]*|\1$BIND_UID|" "$ENV_FILE"
             ok "SANDBOX_BIND_VOLUME_UID rewritten in $ENV_FILE"
         fi
     elif [[ -f "$ENV_FILE" ]]; then

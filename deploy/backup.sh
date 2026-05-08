@@ -38,6 +38,22 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Defense in depth: refuse to operate if BACKUP_ROOT is empty or `/`
+# — the retention loop at the bottom does `rm -rf` on subdirectories
+# of BACKUP_ROOT, and an unset/empty value would have `find` walk the
+# current working directory instead.
+if [[ -z "$BACKUP_ROOT" || "$BACKUP_ROOT" == "/" ]]; then
+    echo "ERROR: BACKUP_ROOT must be a non-empty absolute path other than /" >&2
+    exit 1
+fi
+case "$BACKUP_ROOT" in
+    /*) : ;;
+    *)
+        echo "ERROR: BACKUP_ROOT must be absolute (got: $BACKUP_ROOT)" >&2
+        exit 1
+        ;;
+esac
+
 ts="$(date -u +%Y%m%d-%H%M%S)"
 dest="$BACKUP_ROOT/sandbox-$ts"
 mkdir -p "$dest"
@@ -109,6 +125,17 @@ mapfile -t old < <(
 )
 for d in "${old[@]:-}"; do
     [[ -z "$d" ]] && continue
+    # Defense in depth: only ever rm -rf paths that are inside
+    # BACKUP_ROOT and look like our snapshot dirs. Belt-and-braces
+    # against a malformed BACKUP_ROOT or a `find` quirk producing an
+    # unexpected path.
+    case "$d" in
+        "$BACKUP_ROOT"/sandbox-*) : ;;
+        *)
+            log "skipping unexpected path (not under \$BACKUP_ROOT/sandbox-*): $d"
+            continue
+            ;;
+    esac
     log "removing $d"
     rm -rf "$d"
 done

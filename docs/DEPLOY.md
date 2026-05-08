@@ -101,6 +101,64 @@ curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/healthz
 with `prjquota`. Override with `XFS_SIZE_GB=200 sudo deploy/setup-host.sh --full --with-xfs-quota`.
 Skip the flag if you've already mounted a real XFS partition there.
 
+## Choosing the runtime image
+
+Two runtime images are published per release. Per-session sandbox
+containers use whichever one `SANDBOX_SANDBOX_IMAGE` resolves to;
+the control plane and proxy are unaffected.
+
+| Image | Compressed size | When to use |
+|---|---|---|
+| `ghcr.io/jisulicious/sandbox-runtime:<tag>` | ~150 MiB | **Default.** Generic shell / code-running tasks. Fast first-pull. |
+| `ghcr.io/jisulicious/sandbox-runtime-ds:<tag>` | ~5–7 GiB | Data-science / ML / document-generation workloads. |
+
+The `-ds` variant bundles:
+
+- **Data science / ML** (Python): pandas, numpy, scipy, pyarrow,
+  scikit-learn, xgboost, catboost, shap, umap-learn, statsmodels,
+  ruptures, mlxtend, numba, plus heavyweight optionals dowhy,
+  econml, dask.
+- **Visualization** (Python): plotly + kaleido, matplotlib,
+  seaborn.
+- **Document generation** (mixed):
+  - pptx — `pptxgenjs` (Node) for create-from-scratch; `markitdown`,
+    `python-pptx`, `pillow`, `lxml` (Python) for read / edit /
+    thumbnails.
+  - xlsx — `openpyxl` (Python) for create / edit; `soffice`
+    (LibreOffice) for formula recalc. Pure Python — no Node side.
+  - docx — `docx` (Node) for create-from-scratch; `pandoc`,
+    `python-docx`, `lxml` (Python) for read / edit; `soffice` for
+    legacy `.doc` → `.docx` conversion.
+- **Data IO** (Python): openpyxl, sqlalchemy, psycopg2-binary,
+  adbc-driver-postgresql.
+
+Canonical version pins live in
+[`sandbox/ds/requirements.txt`](../sandbox/ds/requirements.txt) and
+[`sandbox/ds/package.json`](../sandbox/ds/package.json). Smoke
+tests run inside the image at `/opt/ds/smoke.{py,js,sh}`.
+
+**To switch**, set `SANDBOX_SANDBOX_IMAGE` in `/etc/sandbox/env`:
+
+```bash
+# Default (minimal):  unset SANDBOX_SANDBOX_IMAGE
+# Or pin explicitly:
+# SANDBOX_SANDBOX_IMAGE=ghcr.io/jisulicious/sandbox-runtime:v0.2.0
+#
+# Data-science / ML / document-generation:
+SANDBOX_SANDBOX_IMAGE=ghcr.io/jisulicious/sandbox-runtime-ds:v0.2.0
+```
+
+```bash
+sudo docker compose --env-file /etc/sandbox/env pull
+sudo docker compose --env-file /etc/sandbox/env up -d
+```
+
+The `image-warmer` service pulls whatever
+`SANDBOX_SANDBOX_IMAGE` resolves to before the control plane
+starts accepting traffic, so the first `/v1/sessions` request
+isn't gated on a multi-GB pull. Plan ~2–4 minutes of pull time
+on a typical home connection the first time you switch to `-ds`.
+
 ## Other distros
 
 `setup-host.sh --full` is apt-only. On Rocky/RHEL/Alma:

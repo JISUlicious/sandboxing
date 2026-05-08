@@ -1,0 +1,10 @@
+{
+  "name": "sandbox-runtime-ds-node-deps",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Node deps for Anthropic's pptx/docx skills bundled into sandbox-runtime-ds. xlsx is intentionally absent — that skill is pure Python.",
+  "dependencies": {
+    "pptxgenjs": "^3.12",
+    "docx": "^9.0"
+  }
+}

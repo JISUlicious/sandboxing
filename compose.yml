@@ -68,8 +68,14 @@ services:
     # exit (code 0) does NOT restart, so the warmer stays a one-shot.
     restart: on-failure:3
     entrypoint: ["/bin/sh", "-c"]
+    # SANDBOX_SANDBOX_IMAGE — operator-set in /etc/sandbox/env to pick
+    # a runtime variant (e.g. sandbox-runtime-ds for the data-science
+    # stack). Falls back to the minimal sandbox-runtime image when
+    # unset. Same fallback shape used by the control-plane service
+    # below so both stay in sync without the operator having to set
+    # the var twice.
     command: |
-      docker pull ${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-runtime:${SANDBOX_VERSION:-latest}
+      docker pull ${SANDBOX_SANDBOX_IMAGE:-${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-runtime:${SANDBOX_VERSION:-latest}}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
@@ -102,7 +108,11 @@ services:
     environment:
       SANDBOX_NETWORK_NAME: "sandbox_egress"
       SANDBOX_EGRESS_PROXY_URL: "http://${PROXY_IP:-172.30.0.2}:${PROXY_PORT:-3128}"
-      SANDBOX_SANDBOX_IMAGE: "${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-runtime:${SANDBOX_VERSION:-latest}"
+      # Operator-overridable: set SANDBOX_SANDBOX_IMAGE in /etc/sandbox/env
+      # to pick a runtime variant (e.g. sandbox-runtime-ds). Falls back
+      # to the minimal sandbox-runtime image with the standard tag when
+      # unset. Same construction as image-warmer's pull command above.
+      SANDBOX_SANDBOX_IMAGE: "${SANDBOX_SANDBOX_IMAGE:-${SANDBOX_IMAGE_NAMESPACE:-ghcr.io/jisulicious}/sandbox-runtime:${SANDBOX_VERSION:-latest}}"
       SANDBOX_QUOTA_SETUP_CMD: "/opt/sandbox/deploy/xfs-quota-setup-compose.sh"
       SANDBOX_QUOTA_TEARDOWN_CMD: "/opt/sandbox/deploy/xfs-quota-teardown-compose.sh"
       # The workspace mount path on the host. Override via a `.env`

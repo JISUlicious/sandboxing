@@ -41,15 +41,23 @@ control plane on the host's Docker daemon — they live on the same
 git clone https://github.com/JISUlicious/sandboxing
 cd sandboxing
 
-# 1. Install Docker, gVisor, daemon.json (userns-remap), iptables,
-#    sandbox_egress network, slice-9 security hardening — all in one.
-sudo deploy/setup-host.sh --full --with-xfs-quota
-
-# 2. Drop in /etc/sandbox/env. Set the two secrets.
+# 1. Drop in /etc/sandbox/env BEFORE running setup-host.sh.
+#    Why first: setup-host.sh doesn't create the env file — it
+#    expects it to exist, then auto-derives SANDBOX_BIND_VOLUME_UID
+#    from this host's dockremap subuid range (`/etc/subuid`) and
+#    writes it back into the file. If the env file is missing when
+#    the script runs, that auto-derivation is skipped silently and
+#    you fall back to the example's hardcoded value — wrong on any
+#    host with a non-default subuid range.
+sudo install -d -m 0755 /etc/sandbox
 sudo cp deploy/.env.compose.example /etc/sandbox/env
-sudoedit /etc/sandbox/env                    # SANDBOX_API_TOKEN + _PEPPER
-sudo chown root:sandbox /etc/sandbox/env
-sudo chmod 0640 /etc/sandbox/env
+sudoedit /etc/sandbox/env                    # set SANDBOX_API_TOKEN + _PEPPER
+
+# 2. Install Docker, gVisor, daemon.json (userns-remap), iptables,
+#    sandbox_egress network, the `sandbox` system user, slice-9
+#    security hardening, AND auto-derive SANDBOX_BIND_VOLUME_UID
+#    + 0640 root:sandbox perms on the env file. Idempotent.
+sudo deploy/setup-host.sh --full --with-xfs-quota
 
 # 3. Add yourself to the `sandbox` group so docker compose can read
 #    /etc/sandbox/env without sudo. Re-login (or `newgrp sandbox`)
@@ -68,6 +76,18 @@ TOKEN=$(sudo grep API_TOKEN /etc/sandbox/env | cut -d= -f2)
 curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/healthz
 # {"status":"ok"}
 ```
+
+> **Why `setup-host.sh` reads the env file with `awk` rather than
+> `source`-ing it:** the script sources only specific keys
+> (`SANDBOX_VOLUME_BASE`, `SANDBOX_SUBNET`, `PROXY_IP`, `PROXY_PORT`,
+> `SANDBOX_FS_IMG`, `SANDBOX_IMAGE_NAMESPACE`) as fallbacks via
+> `awk -F= '$1==key{print $2; exit}'`. This is so operator overrides
+> in `/etc/sandbox/env` flow into the same compose-substitution
+> values that `docker compose --env-file /etc/sandbox/env up` sees,
+> without the script having to fully evaluate a shell-syntax file
+> as root. The script also _writes back_ `SANDBOX_BIND_VOLUME_UID`
+> after computing it from `/etc/subuid` — that's why the env file
+> must exist before the script runs.
 
 > **Permission denied on `/etc/sandbox/env`?** This means step 3's
 > group change hasn't taken effect in the current shell. Either run

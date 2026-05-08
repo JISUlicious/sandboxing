@@ -261,39 +261,49 @@ SANDBOX_EGRESS_PROXY_URL=http://172.30.0.2:3128
 ### 6 · Control plane as a systemd service
 
 ```bash
+# 1. System user (or let setup-host.sh do this for you in step 4).
 sudo useradd -r -s /sbin/nologin sandbox
 sudo usermod -aG docker sandbox
+
+# 2. State directories.
 sudo mkdir -p /opt/sandbox /var/lib/sandbox /var/log/sandbox /etc/sandbox
-# Deploy the repo to /opt/sandbox, then as the sandbox user:
-sudo -u sandbox bash -c 'cd /opt/sandbox && uv sync'
+sudo -u sandbox bash -c 'cd /opt/sandbox && uv sync'   # deploy repo first
 sudo chown -R sandbox:sandbox /var/lib/sandbox /var/log/sandbox
+
+# 3. Env file. Use the canonical example as the base, then fill in
+#    the two required secrets. setup-host.sh in step 4 will
+#    auto-fill SANDBOX_BIND_VOLUME_UID for THIS host's dockremap
+#    subuid range and enforce 0640 root:sandbox perms.
+sudo cp /opt/sandbox/deploy/.env.compose.example /etc/sandbox/env
+sudoedit /etc/sandbox/env       # set SANDBOX_API_TOKEN + SANDBOX_TOKEN_PEPPER
 ```
 
-`/etc/sandbox/env`:
+> **Compose-vs-systemd env-file overlap:** the canonical
+> `deploy/.env.compose.example` is shaped for the Compose path's
+> `compose.yml` substitution. The systemd path doesn't use
+> `compose.yml`, so a few keys in the example are no-ops here
+> (`SANDBOX_VERSION`, `SANDBOX_IMAGE_NAMESPACE`, `SANDBOX_SUBNET`,
+> `PROXY_IP`, `PROXY_PORT`). Conversely the systemd path's
+> `sandbox-api.service` reads a few additional keys not pinned in
+> the example: `SANDBOX_BIND_HOST=127.0.0.1`, `SANDBOX_BIND_PORT=8000`,
+> `SANDBOX_DB_PATH=/var/lib/sandbox/sandbox.db`,
+> `SANDBOX_AUDIT_LOG_PATH=/var/log/sandbox/audit.log`,
+> `SANDBOX_SANDBOX_IMAGE=sandbox-runtime:latest`,
+> `SANDBOX_EGRESS_PROXY_URL=http://172.30.0.2:3128`,
+> `SANDBOX_QUOTA_SETUP_CMD=/opt/sandbox/deploy/xfs-quota-setup.sh`,
+> `SANDBOX_QUOTA_TEARDOWN_CMD=/opt/sandbox/deploy/xfs-quota-teardown.sh`,
+> `SANDBOX_QUOTA_VOLUME_BASE=/var/lib/sandbox-volumes`. Append those
+> to `/etc/sandbox/env` after the `cp`. (Both paths are eventually
+> meant to converge on a single example; tracked as a follow-up.)
 
-```ini
-SANDBOX_API_TOKEN=<32-byte random; openssl rand -hex 32>
-SANDBOX_TOKEN_PEPPER=<32-byte random; openssl rand -hex 32>
-SANDBOX_BIND_HOST=127.0.0.1
-SANDBOX_BIND_PORT=8000
-SANDBOX_DB_PATH=/var/lib/sandbox/sandbox.db
-SANDBOX_AUDIT_LOG_PATH=/var/log/sandbox/audit.log
-SANDBOX_SANDBOX_IMAGE=sandbox-runtime:latest
-SANDBOX_EGRESS_PROXY_URL=http://172.30.0.2:3128
-SANDBOX_QUOTA_SETUP_CMD=/opt/sandbox/deploy/xfs-quota-setup.sh
-SANDBOX_QUOTA_TEARDOWN_CMD=/opt/sandbox/deploy/xfs-quota-teardown.sh
-SANDBOX_QUOTA_VOLUME_BASE=/var/lib/sandbox-volumes
-# SPEC-401 — host UID that maps to container UID 10001 under
-# userns-remap=default. setup-host.sh fills this in automatically;
-# compute manually with (note the +10001 — agent UID is 10001 inside
-# the container, not 10000):
-#   awk -F: '$1=="dockremap"{print $2 + 10001}' /etc/subuid
-SANDBOX_BIND_VOLUME_UID=110001
-# Slice 12 — optional admin token for the tenant-management API.
-# Single-tenant deployments don't need this; admin endpoints return
-# 503 admin_disabled when unset. Generate with `openssl rand -hex 32`.
-# SANDBOX_ADMIN_TOKEN=<32-byte random; openssl rand -hex 32>
-# SANDBOX_DEV_MODE intentionally absent — production posture.
+```bash
+# 4. Apply the hardened systemd unit + sudoers helper + logrotate +
+#    audit-log immutability. Idempotent.
+sudo /opt/sandbox/deploy/setup-host.sh
+sudo systemctl enable --now sandbox-api
+sudo journalctl -u sandbox-api -f
+curl -H 'Authorization: Bearer '"$(sudo grep API_TOKEN /etc/sandbox/env | cut -d= -f2)" \
+    http://127.0.0.1:8000/healthz
 ```
 
 **Multi-tenant tokens** (slice 7). On first start the service
@@ -386,19 +396,12 @@ filesystem. With `SANDBOX_BIND_VOLUME_UID` set (slice 9), the bind dir
 is chown'd to the dockremap-mapped UID and chmod 0700; without it, the
 control plane falls back to mode 0777 and logs a startup warning.
 
-Apply the hardened systemd unit + sudoers helper + logrotate + audit
-log immutability with the slice-9 bootstrap:
-
-```bash
-sudo /opt/sandbox/deploy/setup-host.sh
-sudo systemctl enable --now sandbox-api
-sudo journalctl -u sandbox-api -f
-curl -H 'Authorization: Bearer '"$(sudo grep API_TOKEN /etc/sandbox/env | cut -d= -f2)" \
-    http://127.0.0.1:8000/healthz
-```
+(The §6 step 4 above already ran `setup-host.sh` once — re-runs
+are safe.)
 
 `setup-host.sh` is idempotent (re-run safe). It:
 
+0. Ensures the `sandbox` system user/group exist (`useradd -r`).
 1. Computes `SANDBOX_BIND_VOLUME_UID` from `/etc/subuid` (`dockremap`
    start + 10001 — matching the agent's container UID 10001) and
    writes it into `/etc/sandbox/env`.
@@ -406,7 +409,9 @@ curl -H 'Authorization: Bearer '"$(sudo grep API_TOKEN /etc/sandbox/env | cut -d
    single-line sudoers grant to `/etc/sudoers.d/sandbox-quota-helper`.
    Removes the legacy wildcard `sandbox-xfs-quota` entry if found.
 3. Installs `/etc/logrotate.d/sandbox` and `chattr +a` the audit log.
-4. Enforces `0640 root:sandbox` on `/etc/sandbox/env`.
+4. Enforces `0640 root:sandbox` on `/etc/sandbox/env` (skipped with
+   a warning if the env file doesn't exist yet — create it before
+   running the script).
 5. Installs the hardened `sandbox-api.service` (the unit lives in
    `deploy/sandbox-api.service` — runs as root with a tight
    `CapabilityBoundingSet`, `NoNewPrivileges`, `ProtectSystem=strict`,

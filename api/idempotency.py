@@ -136,24 +136,48 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
 
             if response.status_code in _CACHEABLE_STATUS_RANGE:
-                body_bytes, content_type = await _read_body_bytes(response)
-                await self._registry.store_idempotency(
-                    tenant_id=tenant_id,
-                    key=key,
-                    route_template=route_template,
-                    status_code=response.status_code,
-                    body_json=body_bytes.decode("utf-8") if body_bytes else "",
-                    content_type=content_type,
-                    ttl_s=self._settings.idempotency_ttl_s,
-                )
-                # We consumed the streaming body to cache it; rebuild
-                # a Response so downstream Starlette ASGI sends it.
-                response = Response(
-                    content=body_bytes,
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    media_type=content_type or None,
-                )
+                # SSE streaming responses cannot be safely cached:
+                # `_read_body_bytes` drains the response body to compute
+                # a Content-Length, which forces Starlette to send the
+                # entire payload in one batch (no Transfer-Encoding:
+                # chunked, no incremental delivery). That defeats the
+                # whole point of /exec/stream — clients see all SSE
+                # frames bunch at the end of execution.
+                #
+                # And replay semantics for a real-time stream are
+                # awkward anyway: a frozen byte-snapshot of "what
+                # would have streamed" doesn't preserve inter-chunk
+                # timing. Operators using Idempotency-Key on a
+                # streaming endpoint get exactly-once execution on the
+                # first call (no in-flight duplicate via the lock
+                # above) but no cached replay on retry — they have to
+                # re-run, which for a streaming endpoint is fine since
+                # outputs are observability, not state mutation.
+                response_ct = response.headers.get("content-type", "")
+                if response_ct.startswith("text/event-stream"):
+                    log.debug(
+                        "idempotency: skipping cache for streaming response (%s %s)",
+                        request.method, route_template,
+                    )
+                else:
+                    body_bytes, content_type = await _read_body_bytes(response)
+                    await self._registry.store_idempotency(
+                        tenant_id=tenant_id,
+                        key=key,
+                        route_template=route_template,
+                        status_code=response.status_code,
+                        body_json=body_bytes.decode("utf-8") if body_bytes else "",
+                        content_type=content_type,
+                        ttl_s=self._settings.idempotency_ttl_s,
+                    )
+                    # We consumed the streaming body to cache it; rebuild
+                    # a Response so downstream Starlette ASGI sends it.
+                    response = Response(
+                        content=body_bytes,
+                        status_code=response.status_code,
+                        headers=dict(response.headers),
+                        media_type=content_type or None,
+                    )
             await self._release_inflight(tenant_id, key)
             return response
 

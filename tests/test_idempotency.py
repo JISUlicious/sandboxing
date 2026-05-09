@@ -99,6 +99,56 @@ def test_invalid_bearer_skips_middleware(client):
     assert r.json()["detail"]["code"] == "unauthorized"
 
 
+def test_streaming_response_not_cached(authed, fake_docker, service):
+    """v0.2.9 regression: a streaming response (SSE on /exec/stream)
+    with an Idempotency-Key must NOT be drained into bytes and cached.
+    Pre-fix: middleware called `_read_body_bytes()` on the streaming
+    response, computed Content-Length, and rebuilt as a static
+    Response — clients saw all SSE frames bunch at the end of execution
+    instead of arriving incrementally. Customer (adk-cc) reported this
+    as plan-sandbox-issues-from-e2e.md #14.
+
+    The fix lets the StreamingResponse pass through untouched when
+    Content-Type starts with 'text/event-stream'; cache row is NOT
+    written, so a retry with the same key re-executes (acceptable for
+    streaming endpoints — the alternative, cached frozen snapshot
+    replay, doesn't preserve real-time timing anyway)."""
+    import asyncio
+
+    sid = authed.post("/v1/sessions", json={}).json()["session_id"]
+    stream_key = str(uuid.uuid4())
+    fake_docker.stream_exec_scripts.append(
+        [
+            ("stdout", b"line-1\n"),
+            ("stdout", b"line-2\n"),
+            ("stdout", b"line-3\n"),
+            ("exit", 0),
+        ]
+    )
+    r = authed.post(
+        f"/v1/sessions/{sid}/exec/stream",
+        json={"argv": ["/bin/echo", "hi"]},
+        headers={
+            "Authorization": "Bearer test-token",
+            "Idempotency-Key": stream_key,
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    # Body must contain the SSE-framed events (not a cached single blob).
+    assert "event: stdout" in r.text
+    assert "event: result" in r.text
+
+    # The load-bearing assertion: the streaming response was NOT cached.
+    cached = asyncio.run(
+        service.registry.lookup_idempotency(tenant_id="default", key=stream_key)
+    )
+    assert cached is None, (
+        "IdempotencyMiddleware must not drain+cache SSE responses; "
+        f"got {cached!r}"
+    )
+
+
 def test_concurrent_replays_dedupe(authed, settings, service):
     """Two concurrent POSTs with the same key result in ONE session."""
     import threading

@@ -140,12 +140,9 @@ def test_streaming_response_not_cached(authed, fake_docker, service):
     assert "event: result" in r.text
 
     # The load-bearing assertion: the streaming response was NOT cached.
-    cached = asyncio.run(
-        service.registry.lookup_idempotency(tenant_id="default", key=stream_key)
-    )
+    cached = asyncio.run(service.registry.lookup_idempotency(tenant_id="default", key=stream_key))
     assert cached is None, (
-        "IdempotencyMiddleware must not drain+cache SSE responses; "
-        f"got {cached!r}"
+        f"IdempotencyMiddleware must not drain+cache SSE responses; got {cached!r}"
     )
 
 

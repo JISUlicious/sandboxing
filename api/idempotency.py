@@ -157,7 +157,8 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                 if response_ct.startswith("text/event-stream"):
                     log.debug(
                         "idempotency: skipping cache for streaming response (%s %s)",
-                        request.method, route_template,
+                        request.method,
+                        route_template,
                     )
                 else:
                     body_bytes, content_type = await _read_body_bytes(response)

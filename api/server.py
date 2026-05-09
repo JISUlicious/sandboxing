@@ -279,7 +279,7 @@ def create_app(
         title="Sandbox Service",
         # Track the release tag. Bump on every spec-affecting change so
         # consumers pinned against an older version can detect drift.
-        version="0.2.7",
+        version="0.2.8",
         description=API_DESCRIPTION,
         openapi_tags=TAGS_METADATA,
         lifespan=lifespan,
@@ -629,7 +629,27 @@ def create_app(
             "thread crashed; the client should treat this as a 5xx.\n\n"
             "Stdin is rejected with 400 — combining stdin with live demuxed "
             "streaming is a future slice. OpenAPI tooling does not generate "
-            "useful clients for SSE; consume with a streaming HTTP client."
+            "useful clients for SSE; consume with a streaming HTTP client.\n\n"
+            "**Buffering caveat**: this endpoint streams chunks as the "
+            "Docker daemon delivers them — there is no server-side "
+            "accumulation. However, the program being executed may itself "
+            "buffer its output. glibc's `stdio` block-buffers FD 1 with "
+            "a 4–8 KiB buffer when stdout is a pipe (which is true under "
+            "`docker exec`), so a C/Python program that writes "
+            "small `printf` / `print(...)` bursts will appear to deliver "
+            "its output all at once at process exit, despite this "
+            "endpoint correctly streaming what the program emits.\n"
+            "To get incremental output regardless of buffer sizes:\n"
+            "- Bash builtin `echo` writes via `write(2)` directly — "
+            "  no buffering. Streams natively.\n"
+            "- Stderr (FD 2) is line-buffered by default in glibc — "
+            "  redirect with `>&2` for incremental progress messages.\n"
+            "- Wrap with `stdbuf -oL -eL <cmd>` to force line-buffering "
+            "  on stdout/stderr.\n"
+            "- For Python: `python -u`, or `print(..., flush=True)`, "
+            "  or `PYTHONUNBUFFERED=1` in `env`.\n"
+            "- For Node: `process.stdout.write(...)` is unbuffered; "
+            "  `console.log` flushes on `\\n` so it streams naturally."
         ),
         response_class=StreamingResponse,
         responses={

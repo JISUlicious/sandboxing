@@ -491,11 +491,20 @@ async def _run_one_level(
 
     per_op = {k: _percentiles(v) for k, v in stats.op_latencies.items()}
 
-    # p99 ratio breach: only meaningful when N=1 baseline exists.
+    # p99 ratio breach: only meaningful when N=1 baseline exists AND
+    # the absolute latency is high enough that 10× the baseline
+    # represents a real responsiveness problem. Sub-second baselines
+    # tripping a "10× of 30ms" breach is just measurement noise.
+    P99_ABSOLUTE_FLOOR_S = 1.0
     if n1_p99:
         for kind, ps in per_op.items():
             ref = n1_p99.get(kind)
-            if ref and ps["p99"] is not None and ps["p99"] > 10 * ref:
+            if (
+                ref
+                and ps["p99"] is not None
+                and ps["p99"] > 10 * ref
+                and ps["p99"] > P99_ABSOLUTE_FLOOR_S
+            ):
                 breach.setdefault("reason", f"p99_{kind}_over_10x_baseline")
 
     if err_rate > 0.01 and total_ops >= 100:

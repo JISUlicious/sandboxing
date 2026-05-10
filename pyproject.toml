@@ -40,6 +40,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration: real-Docker tests (skip in unit-test runs; CI runs them on a Linux runner)",
+    "load: long-running concurrency / capacity tests against a live API (opt-in; see tests/load/README.md)",
 ]
 
 [tool.ruff]

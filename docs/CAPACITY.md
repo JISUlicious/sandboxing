@@ -79,30 +79,65 @@ calculator flags `N` above the tested ceiling as extrapolated, so
 you know to re-run with a higher `--max-sessions` before betting
 real money on the number.
 
-## Worked example (placeholder — replace with measured)
+## First measured numbers — base sandbox image, small box
 
-> _After your first ramp run, replace the table below with the
-> numbers from `tests/load/results/ramp_<latest>.json`._
+These are the numbers from the harness's first real run. The host
+is intentionally small (Pentium G4560, 8 GiB RAM, runc); coefficients
+are stable across five repeat runs but the high-N degradation
+behaviour is unmeasured here because the box auto-caps at N=3.
+**Re-run on a host that approximates your deployment target for a
+tighter answer.**
 
-| Variable                 | Value (placeholder)              |
-|--------------------------|----------------------------------|
-| Host where ramp ran      | _e.g._ 8 vCPU / 32 GiB / runsc   |
-| Last clean level         | _e.g._ 50                         |
-| Degradation level        | _e.g._ 100 (host_cpu_over_90_for_30s) |
-| `avg_session_rss_mib`    | _e.g._ 95                         |
-| `avg_session_cpu_pct`    | _e.g._ 4                          |
-| Burst-create p99 @ N=50  | _e.g._ 1.4 s                      |
-| Exec p99 @ N=50          | _e.g._ 180 ms                     |
+| Variable                 | Value (base image)                  |
+|--------------------------|-------------------------------------|
+| Host where ramp ran      | 4 vCPU / 8 GiB (runc, overlayfs)    |
+| Image                    | `sandbox-runtime:latest`            |
+| Last clean level         | 1 (autocap reduced ramp to [1, 3])  |
+| Degradation level        | 3 (`p99_exec_over_10x_baseline`)    |
+| `avg_session_rss_mib`    | ≈ 17 MiB (range 17.07–17.92 across 5 runs) |
+| `avg_session_cpu_pct`    | ≈ 7 % (range 7.07–7.77 across 5 runs)      |
 
-Calculator output for 100 concurrent / 50% active / 25% margin:
+The 17 MiB / 7 % figures only cover the harness's mixed workload
+(short execs, file roundtrips, fast process starts) on the **base**
+image. The `sandbox-runtime-ds` image preinstalls the data-science
+stack on disk; idle RSS will rise by whatever the in-container
+agent eagerly imports (~30–80 MiB ballpark), but actual workload
+RSS depends entirely on what user code does (a single
+`import pandas` adds ~80 MiB by itself). To measure the ds image,
+re-run with `SANDBOX_IMAGE=sandbox-runtime-ds:latest` and a
+representative workload op.
+
+Sample calculator output sourced from this run:
+
 ```
-$ uv run python -m tools.sandbox_capacity_calc --concurrent-sessions 100
+$ uv run python -m tools.sandbox_capacity_calc --concurrent-sessions 50
+Sandbox capacity recommendation
+================================
+
+Workload: 50 concurrent sessions, 50% active.
+
 Resources needed (with 25% safety margin):
-  CPU      : <N>  cores
-  RAM      : <N>  GiB
-  Disk     : <N>  GiB
-  FD limit : <N>
+  CPU      : 5 cores
+  RAM      : 3 GiB
+  Disk     : 152 GiB
+  FD limit : 2048
+
+Recommended host: ~8 vCPU / 4 GiB / 152 GiB SSD.
+
+Source: tests/load/results/ramp_<ts>.json
+  measured on host: 4 vCPU / 8 GiB (runc)
+  per-session RSS: 17 MiB; CPU at load: 7.1%
+  ramp coverage: tested cleanly up to 1; degradation observed at 3
+  NOTE: target N=50 is above tested ceiling (1); numbers are
+        extrapolated — re-run the ramp at higher --max-sessions
+        for tighter sizing.
 ```
+
+The "RAM: 3 GiB" recommendation extrapolates 17 MiB × 50 sessions
+× safety margin from a single sampled level. Believe it as an
+order-of-magnitude floor, not a final answer — a real workload
+that imports anything will push RSS up and the recommendation
+along with it.
 
 ## Re-running on your hardware
 

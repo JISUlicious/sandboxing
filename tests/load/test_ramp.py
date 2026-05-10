@@ -58,10 +58,19 @@ LEVELS_FULL: tuple[int, ...] = (1, 5, 10, 25, 50, 100, 200)
 SAMPLE_INTERVAL_S: float = 5.0
 WORKLOAD_MIX: tuple[tuple[str, float], ...] = (
     ("exec", 0.70),
-    ("file", 0.20),
-    ("process", 0.10),
+    ("file", 0.25),
+    ("process", 0.05),
 )
 STREAM_FRACTION: float = 0.05  # of exec ops; /exec/stream + Idempotency-Key
+# Bumped from the per-session default of 8. The registry's "RUNNING"
+# count refreshes lazily (process_watcher_interval_s = 2s by default),
+# so fast process ops are still recorded as RUNNING for up to 2s
+# after they actually exit. With process ops at ~5% of workload and
+# typical op rates of tens/sec/session, we can momentarily appear
+# to have a dozen running. 32 keeps headroom and matches the tenant
+# clamp (tenant_max_processes default = 32) — the API caps the
+# request there anyway.
+LOADTEST_MAX_PROCESSES: int = 32
 
 
 # ---------------- helpers ----------------
@@ -200,7 +209,10 @@ class ApiClient:
 
     async def create_session(self) -> tuple[str, float]:
         t0 = time.monotonic()
-        r = await self._http.post("/v1/sessions", json={})
+        r = await self._http.post(
+            "/v1/sessions",
+            json={"limits": {"max_processes": LOADTEST_MAX_PROCESSES}},
+        )
         dt = time.monotonic() - t0
         r.raise_for_status()
         return r.json()["session_id"], dt

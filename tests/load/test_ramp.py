@@ -409,11 +409,40 @@ async def _run_one_level(
         stats.create_latencies.append(dt)
 
     if not sids:
+        # Detect the most common case — bad token — explicitly so the
+        # operator sees "fix LOAD_TOKEN" rather than a generic
+        # "all_creates_failed". httpx raises HTTPStatusError on 4xx/5xx;
+        # we look at the first one's status_code.
+        first_err = stats.errors[0]["error"] if stats.errors else ""
+        if "401" in first_err or "Unauthorized" in first_err:
+            stop_reason = "auth_failed_401_check_LOAD_TOKEN"
+        elif "403" in first_err:
+            stop_reason = "auth_failed_403_token_lacks_session_create_scope"
+        else:
+            stop_reason = "all_creates_failed"
         return {
             "N": n,
+            "sessions_created": 0,
             "stopped_early": True,
-            "stop_reason": "all_creates_failed",
-            "errors": stats.errors,
+            "stop_reason": stop_reason,
+            "burst_create_seconds": _percentiles([]),
+            "burst_destroy_seconds": _percentiles([]),
+            "per_op_latency_seconds": {
+                "exec": _percentiles([]),
+                "file": _percentiles([]),
+                "process": _percentiles([]),
+            },
+            "stream_seconds": _percentiles([]),
+            "host_samples": [],
+            "control_plane_samples": [],
+            "session_samples": [],
+            "avg_session_rss_mib": None,
+            "avg_session_cpu_pct": None,
+            "error_count": len(stats.errors),
+            "error_total_including_lifecycle": len(stats.errors),
+            "error_rate": 1.0,
+            "errors_sample": stats.errors[:25],
+            "ops_total": 0,
         }
 
     # ---- steady-state mixed workload ----
@@ -559,14 +588,14 @@ async def test_ramp(
         for n in levels:
             level = await _run_one_level(n, api, duration_s, docker_client, n1_p99)
             levels_out.append(level)
-            if n == 1:
-                for kind, ps in level["per_op_latency_seconds"].items():
-                    if ps["p99"] is not None:
-                        n1_p99[kind] = ps["p99"]
             if level.get("stopped_early"):
                 summary_stop_reason = f"level {n}: {level['stop_reason']}"
                 log.warning("ramp halted at N=%d: %s", n, level["stop_reason"])
                 break
+            if n == 1:
+                for kind, ps in level.get("per_op_latency_seconds", {}).items():
+                    if ps.get("p99") is not None:
+                        n1_p99[kind] = ps["p99"]
     finally:
         await api.aclose()
         if docker_client is not None:
@@ -620,4 +649,16 @@ async def test_ramp(
 
     # Test-side assertions: harness produced a usable artifact.
     assert levels_out, "no levels ran"
-    assert any(lvl["sessions_created"] > 0 for lvl in levels_out), "no sessions ever created"
+    if not any(lvl.get("sessions_created", 0) > 0 for lvl in levels_out):
+        # The result JSON is still written so the operator can inspect
+        # errors_sample to debug. Surface the most likely cause in the
+        # assertion message.
+        first_reason = levels_out[0].get("stop_reason", "unknown")
+        first_errors = levels_out[0].get("errors_sample", [])
+        raise AssertionError(
+            f"no sessions ever created; stop_reason={first_reason!r}; "
+            f"first error: {first_errors[0]['error'] if first_errors else 'none'}; "
+            f"check the API token, scope grants, and `curl -i ${{LOAD_BASE_URL}}/v1/sessions "
+            f"-X POST -H 'Authorization: Bearer ${{LOAD_TOKEN}}' -d '{{}}'`. "
+            f"Result file: {out_path}"
+        )

@@ -255,14 +255,21 @@ class ApiClient:
         return time.monotonic() - t0
 
     async def process_start_and_poll(self, sid: str) -> float:
+        # Short sleep + explicit DELETE: without cleanup, /bin/sleep
+        # processes pile up against Limits.max_processes (default 8)
+        # after only a handful of ops and every subsequent start
+        # returns 429. The roundtrip we want to time is
+        # start → poll → stop, not the sleep itself.
         t0 = time.monotonic()
         r = await self._http.post(
             f"/v1/sessions/{sid}/processes",
-            json={"argv": ["/bin/sleep", "5"]},
+            json={"argv": ["/bin/sleep", "0.5"]},
         )
         r.raise_for_status()
         pid = r.json()["process_id"]
         r = await self._http.get(f"/v1/sessions/{sid}/processes/{pid}")
+        r.raise_for_status()
+        r = await self._http.delete(f"/v1/sessions/{sid}/processes/{pid}")
         r.raise_for_status()
         return time.monotonic() - t0
 

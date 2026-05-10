@@ -3,6 +3,10 @@
 **Status:** Draft v0.2 · **Companion:** [SPECIFICATION.md](./SPECIFICATION.md)
 
 > **Changelog**
+> - v0.3 — Runtime selection clarified. gVisor (`runsc`) is the
+>   production runtime; dev mode falls back to the daemon's default
+>   (typically `runc`). System diagram, hardening flag list, and
+>   isolation table now distinguish the two regimes.
 > - v0.2 — Ambiguity audit. Tightened user-ns model, destroy ordering
 >   (added `DESTROYING` state), network policy, audit failure-mode,
 >   state machine, seccomp/tmpfs flags, dev-mode quota fallback.
@@ -27,8 +31,12 @@ For **what** it does, see [SPECIFICATION.md](./SPECIFICATION.md).
                                      |
                           +----------v----------+
                           |  Docker Engine      |
-                          |  runtime: runsc     |
+                          |  runtime: runsc *   |
                           +----------+----------+
+                          * production. Dev mode
+                            falls back to runc;
+                            see §2.3 "Runtime
+                            selection".
                                      |
        +-----------------+-----------+-----------+-----------------+
        |                 |                       |                 |
@@ -55,13 +63,15 @@ For **what** it does, see [SPECIFICATION.md](./SPECIFICATION.md).
 **Process model.** Three processes run continuously on the host: the
 **control plane** (FastAPI / uvicorn — this codebase, launched directly
 or via the systemd unit in `deploy/sandbox-api.service`), the **Docker
-daemon** (with `runsc` registered as a runtime), and the **egress
-proxy** (Squid in the `sandbox-proxy` container, joined to
-`sandbox_egress` at a pinned IP). One additional process per active
-session — the gVisor-sandboxed runtime container — is created and
-torn down by the session lifecycle. SQLite, the audit JSONL, and the
-per-session XFS-pinned volumes live on host disk; the control plane
-is the only thing that talks to the Docker daemon.
+daemon** (with `runsc` registered as a runtime in production
+deployments), and the **egress proxy** (Squid in the `sandbox-proxy`
+container, joined to `sandbox_egress` at a pinned IP). One additional
+process per active session — the sandboxed runtime container,
+gVisor-isolated in production and `runc`-fallback in dev mode (§2.3)
+— is created and torn down by the session lifecycle. SQLite, the
+audit JSONL, and the per-session XFS-pinned volumes live on host
+disk; the control plane is the only thing that talks to the Docker
+daemon.
 
 ## 2. Components
 
@@ -124,7 +134,7 @@ CREATE INDEX idx_sessions_activity ON sessions(last_activity_at);
   tests):
 
 ```
-runtime              = "runsc"
+runtime              = "runsc"   # production; omitted in dev mode (§2.3.1)
 read_only            = True
 tmpfs                = {"/tmp": "size=256m,mode=1777,noexec,nosuid,nodev"}
 volumes              = {volume_name: {"bind": "/workspace", "mode": "rw"}}
@@ -162,6 +172,75 @@ labels               = {"sandbox.session_id": session_id,
 # subuid in the dockremap range. gVisor adds a separate user-ns inside
 # its sentry.
 ```
+
+#### 2.3.1 Runtime selection
+
+- **ARCH-022** Runtime is `runsc` (gVisor) in **production** and the
+  daemon's default (typically `runc`) in **dev mode**. The choice is
+  a single boolean: `Settings.dev_mode`, set via
+  `SANDBOX_DEV_MODE=1`. In production
+  `api/docker_client.py:hardening_flags` writes
+  `runtime="runsc"`; in dev mode the field is omitted.
+- **ARCH-023** Production startup enforces the choice:
+  `DockerClient.ensure_runtime()` calls `docker info`, asserts
+  `"runsc"` is in `Runtimes`, and exits the service if not. Dev mode
+  skips the check so the API is usable on macOS / Windows / Linux
+  hosts without gVisor installed.
+- **ARCH-024** Where gVisor actually runs: Linux x86_64 hosts with
+  `runsc` installed (the Debian/Ubuntu apt source at
+  `https://storage.googleapis.com/gvisor/releases`, handled by
+  `deploy/setup-host.sh` § F2). gVisor does not run on macOS or
+  Windows hosts; arm64 Linux support exists but is less battle-tested
+  by upstream. Hosts outside that envelope must run in dev mode and
+  accept the security degradation below.
+- **ARCH-025** Dev-mode degradation. Without `runsc`, **isolation
+  layer 1 (user-space kernel) is removed**; sandbox containers share
+  the host kernel through `runc` like any normal Docker container.
+  Layers 2–8 (cap drop, identity / userns-remap, read-only rootfs,
+  cgroups, network bridge + Squid, tenant tokens, audit) still apply.
+  Dev mode is intended for local development, CI smoke tests, and
+  hosts where gVisor isn't available — never for multi-tenant
+  production. The isolation table in §4 reflects the production
+  layering; dev mode loses row 1.
+- **ARCH-026** Verification. To check what runtime a live session is
+  actually using:
+
+  ```bash
+  docker inspect "sandbox-<session_id>" --format '{{.HostConfig.Runtime}}'
+  # expect: runsc (production)  or  runc (dev mode)
+  ```
+
+  Don't rely on the daemon's `default_runtime` field — that's a
+  per-host setting and can be `runc` even when the sandbox service
+  is correctly engaging `runsc` per-container.
+
+**Mental model.** `runc` shares the host kernel; `runsc` emulates one
+in userspace per container. Under `runc`, a process inside the
+container makes a syscall and it goes straight to the host kernel —
+isolation is namespaces + cgroups + (optionally) seccomp, but the
+kernel surface is the host's. Under `runsc`, the container's
+syscalls are caught at the **Sentry** boundary (a Go process that
+runs as part of `runsc`); the Sentry implements ~200 syscalls itself
+in userspace, so for those, the host kernel is never touched. For
+the rest (real disk I/O, network packets, time, scheduling, memory
+mapping), the Sentry calls into the host kernel — but only through
+a strict seccomp-bpf allowlist of ~50 host syscalls. So an attacker
+needs to break the Sentry first (escape the userspace kernel),
+*then* break the seccomp gate (escape the broker's allowlist),
+*then* exploit a host kernel CVE. That layering is the reason
+gVisor is suitable for multi-tenant where you can't trust the
+workload.
+
+**Trade-offs.** ~10–30 % syscall overhead vs. `runc` (workload-
+dependent — usually invisible for our Python/Node/Bash workloads,
+sometimes painful for syscall-heavy code). Some uncommon syscalls
+and Linux features aren't fully implemented or behave subtly
+differently — eBPF, certain namespace ops, parts of `/proc` and
+`/sys`. Two platforms ship: `runsc` (default, ptrace-based,
+slowest) and `runsc --platform=kvm` (much faster on bare metal
+with KVM, near-`runc` speed). `deploy/setup-host.sh` registers
+both runtimes; production switches between them by setting the
+`runtime` field to `runsc` vs `runsc-kvm` per container.
 
 ### 2.4 Sandbox Image
 
@@ -337,7 +416,7 @@ multiple layers.
 
 | # | Layer                       | Mechanism                                       | Stops                                                |
 |---|-----------------------------|-------------------------------------------------|------------------------------------------------------|
-| 1 | User-space kernel           | gVisor `runsc` (KVM platform when available)    | Direct host kernel exploit via syscalls              |
+| 1 | User-space kernel †         | gVisor `runsc` (KVM platform when available)    | Direct host kernel exploit via syscalls              |
 | 2 | Capability + syscall filter | `cap_drop=ALL`, no-new-privileges, runsc filter | Privilege escalation, suspicious syscalls            |
 | 3 | Identity                    | Non-root UID 10001, daemon userns-remap         | UID 0 abuse if a layer breaks                        |
 | 4 | Filesystem                  | Read-only rootfs, tmpfs `/tmp`, per-session vol | Persistence, cross-session FS access, host FS writes |
@@ -345,6 +424,14 @@ multiple layers.
 | 6 | Network                     | Dedicated bridge, no host net, allowlisted prox | Lateral movement, exfiltration, C2                   |
 | 7 | Authorization               | Tenant-scoped tokens, ownership checks          | Tenant A reading tenant B's session                  |
 | 8 | Audit                       | Append-only JSONL of every exec/file/lifecycle  | Post-hoc detection and forensics                     |
+
+† Layer 1 is **only present in production** (`runtime=runsc`). Dev
+mode (`SANDBOX_DEV_MODE=1`) omits the runtime field, falling back to
+`runc`, which removes this layer — sandbox processes then share the
+host kernel through normal Linux namespaces. Use dev mode only for
+local development, CI smoke runs, and non-Linux hosts where gVisor
+isn't available; multi-tenant production deployments must run with
+gVisor. See §2.3.1.
 
 ## 5. Lifecycle State Machine
 

@@ -17,15 +17,60 @@ SPEC-302). Tunnel from your client:
 ssh -L 8000:127.0.0.1:8000 <user>@<linux-host>
 ```
 
-In the testing shell:
+### Get a tenant token
+
+You need a **tenant bearer token** to drive the API. Don't reuse
+`SANDBOX_API_TOKEN` from `/etc/sandbox/env` for testing — that value is
+a *bootstrap* secret. It's used to seed the registry on first start and
+is **ignored on every subsequent start**, so any rotation (or pepper
+change) makes the env-file value diverge from what the live service
+authenticates against. See [SETUP.md → Token lifecycle](./SETUP.md#token-lifecycle).
+
+Ask whoever operates the host to mint a tenant token for you. As the
+**operator** (the one with `sudo` on the host), the simplest issuance
+path is the bootstrap CLI:
+
+```bash
+sudo -u sandbox uv --directory /opt/sandbox run \
+    python -m tools.sandbox_tenants create tester "Functional testing"
+# Prints a single bearer token — copy it now; the API never reprints it.
+```
+
+Or, if `SANDBOX_ADMIN_TOKEN` is set, the admin API:
+
+```bash
+ADMIN=$(sudo grep -E '^SANDBOX_ADMIN_TOKEN=' /etc/sandbox/env | cut -d= -f2)
+curl -sS -X POST http://127.0.0.1:8000/v1/tenants \
+    -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+    -d '{"name":"tester","display_name":"Functional testing"}'
+TOKEN=$(curl -sS -X POST http://127.0.0.1:8000/v1/tenants/tester/tokens \
+    -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+    -d '{"note":"TESTING.md walkthrough"}' | jq -r .token)
+```
+
+The **client** (whoever runs curl) only ever sees the tenant token.
+`SANDBOX_ADMIN_TOKEN` stays on the host and is never exported to the
+client shell.
+
+Once you have a token, you (the client) can rotate it yourself with
+`POST /v1/tenants/me/tokens/rotate` (no admin needed) — useful for
+periodic refresh without going back to the operator.
+
+### Set up the testing shell
 
 ```bash
 export BASE=http://127.0.0.1:8000
-export TOKEN=<the value from /etc/sandbox/env on the Linux host>
+export TOKEN=<the tenant token from above>
 alias api='curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json"'
 # Smoke check — should print {"status":"ok"}.
 api $BASE/healthz
+# Auth smoke — should return a session_id, not null:
+api -d '{}' $BASE/v1/sessions | jq -r .session_id
 ```
+
+If `session_id` is `null`, run with `-i` to see the status code; a 401
+means your `TOKEN` doesn't authenticate (most often: someone handed you
+the env-file value rather than a freshly minted tenant token).
 
 If you bound to a LAN interface and want to skip the tunnel, replace
 `BASE` with `http://<linux-ip>:8000`. (Note the SPEC-302 caveat — only

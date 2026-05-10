@@ -306,9 +306,30 @@ curl -H 'Authorization: Bearer '"$(sudo grep API_TOKEN /etc/sandbox/env | cut -d
     http://127.0.0.1:8000/healthz
 ```
 
-**Multi-tenant tokens** (slice 7). On first start the service
-bootstraps a `default` tenant from `SANDBOX_API_TOKEN` so existing
-single-token deployments keep working. To add more tenants:
+### Token lifecycle
+
+`SANDBOX_API_TOKEN` is a **bootstrap-only** secret. The service uses
+it once, on its first start against an empty registry, to seed the
+`default` tenant's first token (hashed with `SANDBOX_TOKEN_PEPPER`).
+Once the registry is non-empty, the env-file value is **ignored on
+every subsequent start** — the live service authenticates against
+hashes in the SQLite registry, not the env file.
+
+The practical consequences:
+
+- Editing `SANDBOX_API_TOKEN` in `/etc/sandbox/env` after first start
+  has **no effect**. Restarts won't re-bootstrap; the new value won't
+  authenticate. The env file silently drifts from the live service.
+- Rotating `SANDBOX_TOKEN_PEPPER` invalidates **every** existing token
+  hash. After a pepper change, no token authenticates until you issue
+  fresh ones.
+- Wiping the SQLite DB and restarting *will* re-bootstrap from
+  whatever `SANDBOX_API_TOKEN` is set to at that moment. Don't do this
+  on a real deployment — it loses every tenant and token row.
+
+The supported ways to manage tokens after first start:
+
+**Issue a tenant + first token (operator, sudo on host):**
 
 ```bash
 sudo -u sandbox uv --directory /opt/sandbox run \
@@ -319,7 +340,8 @@ sudo -u sandbox uv --directory /opt/sandbox run \
     python -m tools.sandbox_tenants list
 ```
 
-Token rotation goes through the API:
+**Rotate one's own token (no admin needed)** — given a current
+working tenant token:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $OLD_TOKEN" \
@@ -329,6 +351,25 @@ curl -X POST -H "Authorization: Bearer $OLD_TOKEN" \
 
 Both old and new tokens authenticate during the 5-minute grace
 window. After that the old token returns 401.
+
+**Issue / revoke / inspect via the admin API** — see the "Tenant
+management API (slice 12)" subsection below. Admin operations require
+`SANDBOX_ADMIN_TOKEN` (set on the host, never exported to clients).
+
+**If `SANDBOX_API_TOKEN` doesn't authenticate:** that's the drift
+above. Don't try to fix it by editing the env file. Either issue a
+fresh tenant token (above) or — if you have admin — issue a new token
+under `default`:
+
+```bash
+ADMIN=$(sudo grep -E '^SANDBOX_ADMIN_TOKEN=' /etc/sandbox/env | cut -d= -f2)
+curl -sS -X POST http://127.0.0.1:8000/v1/tenants/default/tokens \
+    -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+    -d '{"note":"replacement after env drift"}' | jq -r .token
+```
+
+Save the printed token. The env-file value can be left as-is or
+updated for documentation; the service reads it only on bootstrap.
 
 **Tenant management API (slice 12).** Setting `SANDBOX_ADMIN_TOKEN`
 unlocks the admin surface under `/v1/tenants/*`: create / list /

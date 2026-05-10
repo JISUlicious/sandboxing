@@ -85,3 +85,15 @@ resource_sample_duration_seconds = Histogram(
     "Wall-clock duration of a single sampler sweep.",
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5),
 )
+
+# ----- orphan reaper (slice 13a) -----
+
+# Reaper deletes Docker resources whose `sandbox.session_id` label
+# doesn't correspond to a registry row. `kind` distinguishes
+# container vs volume sweeps; `result` is `ok | error | skipped`
+# (`skipped` covers the per-tick cap and the grace window).
+orphan_reap_total = Counter(
+    "sandbox_orphan_reap_total",
+    "Resources visited by the orphan sweeper.",
+    labelnames=("kind", "result"),
+)

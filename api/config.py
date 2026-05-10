@@ -56,6 +56,22 @@ class Settings(BaseSettings):
     # SPEC-501 — per-session cpu/mem/blkio samples. Set to 0 to disable.
     resource_sample_interval_s: int = 10
 
+    # Slice 13a — orphan-resource sweeper. Detects Docker volumes and
+    # containers labelled with `sandbox.session_id` that the registry
+    # doesn't know about (mid-create crash, registry restored from old
+    # backup, operator DB edit). Complementary to the main reaper,
+    # which handles the inverse direction.
+    orphan_reap_interval_s: int = 3600  # slow tick; not latency-sensitive
+    # Only reap resources whose Docker-side `Created` timestamp is older
+    # than this. Absorbs the sub-second create-path race (volume →
+    # container → registry insert) and post-crash startup
+    # inconsistency before reconciliation completes. Lower for testing.
+    orphan_reap_grace_s: int = 3600
+    # Hard cap per tick so a registry wipe or restore-from-old-backup
+    # can't shred everything in one sweep. Operators can raise this
+    # once they've confirmed the sweeper is well-behaved.
+    orphan_reap_max_per_tick: int = 10
+
     tenant_max_concurrent: int = 50
 
     # SPEC-302 quota hooks. Both empty by default — no-op in dev mode.

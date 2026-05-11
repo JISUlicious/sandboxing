@@ -17,7 +17,7 @@ import time
 import docker as docker_sdk
 
 from api.config import Settings
-from api.docker_client import DockerClient, _parse_docker_iso
+from api.docker_client import DockerClient
 from api.orphan_reaper import LABEL_KEY, OrphanReaper
 from api.registry import Registry
 
@@ -48,18 +48,16 @@ async def main() -> None:
         name=vol_name,
         labels={"sandbox.session_id": sid, "sandbox.tenant_id": "debug"},
     )
-    print(f"[2] volume created. direct inspect:")
+    print("[2] volume created. direct inspect:")
     v = raw.volumes.get(vol_name)
     print(f"    v.name      = {v.name!r}")
     print(f"    v.attrs     = {v.attrs!r}")
 
     dc = DockerClient(settings)
-    print(f"[3] list_volumes_with_label('sandbox.session_id') →")
+    print("[3] list_volumes_with_label('sandbox.session_id') →")
     items = dc.list_volumes_with_label(LABEL_KEY)
     print(f"    total returned = {len(items)}")
-    matches = [
-        i for i in items if (i.get("labels") or {}).get(LABEL_KEY) == sid
-    ]
+    matches = [i for i in items if (i.get("labels") or {}).get(LABEL_KEY) == sid]
     print(f"    matches for test_sid = {len(matches)}")
     if matches:
         m = matches[0]
@@ -68,17 +66,15 @@ async def main() -> None:
         print(f"    label session_id = {(m.get('labels') or {}).get(LABEL_KEY)!r}")
         print(f"    type of label value = {type((m.get('labels') or {}).get(LABEL_KEY)).__name__}")
     else:
-        print(f"    !! test volume NOT in list response — listing skipped it !!")
+        print("    !! test volume NOT in list response — listing skipped it !!")
         print(f"    all returned names: {[i.get('name') for i in items]}")
 
     print(f"[4] sleeping {settings.orphan_reap_grace_s + 2}s...")
     await asyncio.sleep(settings.orphan_reap_grace_s + 2)
 
-    print(f"[5] re-listing after wait:")
+    print("[5] re-listing after wait:")
     items = dc.list_volumes_with_label(LABEL_KEY)
-    matches = [
-        i for i in items if (i.get("labels") or {}).get(LABEL_KEY) == sid
-    ]
+    matches = [i for i in items if (i.get("labels") or {}).get(LABEL_KEY) == sid]
     if matches:
         m = matches[0]
         now = time.time()
@@ -90,9 +86,9 @@ async def main() -> None:
         print(f"    grace = {settings.orphan_reap_grace_s}")
         print(f"    will be skipped under grace? {age < settings.orphan_reap_grace_s}")
     else:
-        print(f"    !! test volume vanished from list !!")
+        print("    !! test volume vanished from list !!")
 
-    print(f"[6] running OrphanReaper.tick() with scoped registry stub...")
+    print("[6] running OrphanReaper.tick() with scoped registry stub...")
     registry = Registry(settings.db_path)
     await registry.init()
 
@@ -110,19 +106,19 @@ async def main() -> None:
     reaper = OrphanReaper(settings=settings, registry=registry, docker=dc, audit=audit)
     await reaper.tick()
 
-    print(f"[7] post-tick check — does volume still exist?")
+    print("[7] post-tick check — does volume still exist?")
     try:
         v = raw.volumes.get(vol_name)
         print(f"    !! STILL EXISTS !! attrs CreatedAt = {v.attrs.get('CreatedAt')!r}")
     except docker_sdk.errors.NotFound:
-        print(f"    GONE — reaper worked as expected")
+        print("    GONE — reaper worked as expected")
 
-    print(f"[8] cleanup")
+    print("[8] cleanup")
     try:
         raw.volumes.get(vol_name).remove(force=True)
-        print(f"    removed by hand")
+        print("    removed by hand")
     except docker_sdk.errors.NotFound:
-        print(f"    already gone")
+        print("    already gone")
 
 
 if __name__ == "__main__":

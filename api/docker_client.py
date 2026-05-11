@@ -16,6 +16,7 @@ import tarfile
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any
 
 import docker
@@ -46,6 +47,54 @@ def _sh_quote(s: str) -> str:
     string. Wraps in single quotes; escapes embedded single quotes.
     Used by the slice-11b process supervisor."""
     return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _parse_docker_iso(iso: str) -> float:
+    """Parse Docker's ISO-8601 timestamps to epoch seconds.
+
+    Docker is inconsistent across resource kinds:
+
+    - **Containers** report `Created` in **UTC with the `Z` suffix**,
+      typically with nanosecond precision:
+      `"2024-05-10T07:39:27.123456789Z"`.
+    - **Volumes** report `CreatedAt` using the **daemon's local
+      timezone** and an explicit offset, without sub-second precision:
+      `"2024-05-10T13:08:41+09:00"`.
+
+    Both forms must parse to the correct absolute epoch. Earlier we
+    stripped the `Z` and forced the tz to UTC, which silently
+    misinterpreted volume-side timestamps for daemons not on UTC —
+    age calculations went negative and the reaper skipped them as
+    "under grace".
+
+    Returns 0.0 if the string is empty or unparseable; callers treat
+    0.0 as "very old" so the grace window still gates a safe
+    decision.
+    """
+    if not iso:
+        return 0.0
+    s = iso
+    # fromisoformat (3.11) accepts microseconds (6 digits) but not
+    # nanoseconds (9 digits). Trim any sub-second part to 6 digits.
+    if "." in s:
+        dot = s.index(".")
+        end = dot + 1
+        while end < len(s) and s[end].isdigit():
+            end += 1
+        frac = s[dot + 1 : end]
+        if len(frac) > 6:
+            s = s[: dot + 1] + frac[:6] + s[end:]
+    try:
+        from datetime import datetime
+
+        dt = datetime.fromisoformat(s)
+        # If the string lacked tz info, assume UTC. Otherwise preserve
+        # the parsed offset — this is what was broken before.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _wrap_with_timeout(argv: list[str], timeout_s: int) -> list[str]:
@@ -342,6 +391,54 @@ class DockerClient:
             return False
         except Exception:
             return True
+
+    def list_containers_with_label(self, label_key: str) -> list[dict[str, Any]]:
+        """Slice 13a — used by the orphan reaper. Returns one dict per
+        container carrying `label_key`, with `name`, `created_epoch_s`
+        (parsed from Docker's ISO `Created` field), and `labels`. The
+        `Created` field is what tells the orphan reaper whether a
+        resource is past the grace window — Docker labels themselves
+        have no timestamp."""
+        results: list[dict[str, Any]] = []
+        try:
+            containers = self.client.containers.list(all=True, filters={"label": label_key})
+        except Exception:
+            log.exception("list_containers_with_label failed")
+            return results
+        for c in containers:
+            attrs = c.attrs or {}
+            created_iso = attrs.get("Created", "")
+            results.append(
+                {
+                    "name": c.name,
+                    "id": c.id,
+                    "created_epoch_s": _parse_docker_iso(created_iso),
+                    "labels": (attrs.get("Config", {}) or {}).get("Labels", {}) or {},
+                }
+            )
+        return results
+
+    def list_volumes_with_label(self, label_key: str) -> list[dict[str, Any]]:
+        """Slice 13a — used by the orphan reaper. See
+        `list_containers_with_label`. Volumes expose `CreatedAt`
+        instead of `Created`; same ISO-8601 shape."""
+        results: list[dict[str, Any]] = []
+        try:
+            volumes = self.client.volumes.list(filters={"label": label_key})
+        except Exception:
+            log.exception("list_volumes_with_label failed")
+            return results
+        for v in volumes:
+            attrs = v.attrs or {}
+            created_iso = attrs.get("CreatedAt", "")
+            results.append(
+                {
+                    "name": v.name,
+                    "created_epoch_s": _parse_docker_iso(created_iso),
+                    "labels": attrs.get("Labels", {}) or {},
+                }
+            )
+        return results
 
     def container_stats(self, container_id: str) -> dict[str, Any]:
         """Single-shot stats snapshot (slice 6b). docker-py's

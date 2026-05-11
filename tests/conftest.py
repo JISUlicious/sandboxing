@@ -121,6 +121,19 @@ class FakeDockerClient:
         missing = getattr(self, "_missing_containers", set())
         return container_id not in missing
 
+    # ----- slice 13a — orphan reaper helpers -----
+
+    def list_containers_with_label(self, label_key: str) -> list[dict[str, Any]]:
+        """Tests stage `orphan_containers` and `orphan_volumes` directly
+        on the fake. Items shape mirrors the real DockerClient helper:
+        `{name, id, created_epoch_s, labels}`."""
+        items = getattr(self, "orphan_containers", [])
+        return [it for it in items if label_key in (it.get("labels") or {})]
+
+    def list_volumes_with_label(self, label_key: str) -> list[dict[str, Any]]:
+        items = getattr(self, "orphan_volumes", [])
+        return [it for it in items if label_key in (it.get("labels") or {})]
+
     # Slice 6b — resource sampler. Returns a fixed snapshot dict; tests
     # override `_stats_response` per-instance to inject specific values.
     def container_stats(self, container_id: str) -> dict[str, object]:

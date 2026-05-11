@@ -52,6 +52,7 @@ from api.models import (
     TenantUsageResponse,
     UpdateTenantRequest,
 )
+from api.orphan_reaper import OrphanReaper
 from api.processes import ProcessService
 from api.reaper import Reaper
 from api.registry import Registry, SessionRow
@@ -199,6 +200,12 @@ def create_app(
         registry=service_.registry, docker=service_.docker, audit=service_.audit
     )
     reaper_ = Reaper(settings=settings_, registry=service_.registry, sessions=service_)
+    orphan_reaper_ = OrphanReaper(
+        settings=settings_,
+        registry=service_.registry,
+        docker=service_.docker,
+        audit=service_.audit,
+    )
     sampler_ = SessionSampler(
         settings=settings_,
         registry=service_.registry,
@@ -265,6 +272,7 @@ def create_app(
             log.warning("docker daemon not reachable; lifecycle calls will fail")
         if start_reaper:
             await reaper_.start()
+            await orphan_reaper_.start()
             await sampler_.start()
         # Compose the FastMCP session manager into our lifespan so the
         # mounted /mcp endpoint is live for the duration of the app.
@@ -273,6 +281,7 @@ def create_app(
                 yield
             finally:
                 await sampler_.stop()
+                await orphan_reaper_.stop()
                 await reaper_.stop()
 
     app = FastAPI(
@@ -287,6 +296,7 @@ def create_app(
     app.state.service = service_
     app.state.settings = settings_
     app.state.reaper = reaper_
+    app.state.orphan_reaper = orphan_reaper_
     app.state.sampler = sampler_
     app.state.mcp = mcp_
     app.state.processes = process_service_

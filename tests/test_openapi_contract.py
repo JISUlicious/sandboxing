@@ -132,3 +132,25 @@ def test_logs_endpoint_declares_text_event_stream(client):
     content = op["responses"]["200"]["content"]
     assert "text/event-stream" in content
     assert "application/json" not in content
+
+
+# ----- Slice 13b — ETA fields on SessionResponse -----
+
+
+def test_session_response_schema_includes_etas(client):
+    """SessionResponse must declare both `idle_stop_at` and
+    `hard_destroy_at` — consumers need them to plan around expiry
+    without subscribing to the audit log."""
+    schema = _schema(client)
+    sr = schema["components"]["schemas"]["SessionResponse"]
+    props = sr.get("properties") or {}
+    assert "idle_stop_at" in props, "idle_stop_at missing from SessionResponse"
+    assert "hard_destroy_at" in props, "hard_destroy_at missing from SessionResponse"
+
+    # idle_stop_at is nullable; hard_destroy_at is required + int.
+    assert sr.get("required") and "hard_destroy_at" in sr["required"]
+    assert "idle_stop_at" not in (sr.get("required") or [])
+
+    # Both fields should carry an operator-readable description.
+    assert "description" in props["idle_stop_at"] and props["idle_stop_at"]["description"]
+    assert "description" in props["hard_destroy_at"] and props["hard_destroy_at"]["description"]

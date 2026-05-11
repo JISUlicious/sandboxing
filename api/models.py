@@ -54,6 +54,28 @@ class SessionResponse(BaseModel):
     limits: Limits
     created_at: int
     last_activity_at: int
+    # Slice 13b — exposed deadlines so clients can plan around expiry
+    # without subscribing to the audit log.
+    idle_stop_at: int | None = Field(
+        default=None,
+        description=(
+            "Epoch milliseconds when, absent further activity, the session "
+            "will be idle-stopped: container removed but `/workspace` "
+            "volume retained, session resumable via `/exec` or any file/"
+            "process op. `null` when the session is in a status not "
+            "subject to idle-stop (`STOPPED`, `DESTROYING`, `DESTROYED`, "
+            "`CREATING`). Bumped forward by mutating ops on the session."
+        ),
+    )
+    hard_destroy_at: int = Field(
+        description=(
+            "Epoch milliseconds when, absent further activity, the session "
+            "will be hard-destroyed: container removed AND `/workspace` "
+            "volume removed. Irreversible. Bumped forward by mutating ops "
+            "on the session. The hard-destroy clock applies to every "
+            "non-terminal session, including `STOPPED` ones."
+        ),
+    )
 
 
 # ----- exec (SPEC-201) -----

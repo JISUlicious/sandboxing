@@ -143,3 +143,75 @@ def test_per_field_limits_violation_returns_400(authed):
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "limit_exceeded"
     assert "vcpu" in r.json()["detail"]["message"]
+
+
+# ----- Slice 13b — destroy / idle-stop ETAs in SessionResponse -----
+
+
+def test_create_response_includes_etas(authed, settings):
+    """A freshly-created RUNNING session has both ETAs populated:
+    idle_stop_at = last_activity_at + idle_stop_minutes,
+    hard_destroy_at = last_activity_at + hard_destroy_hours."""
+    r = authed.post("/v1/sessions", json={})
+    assert r.status_code == 201, r.text
+    body = r.json()
+
+    assert body["status"] == "RUNNING"
+    assert body["idle_stop_at"] is not None
+    assert body["hard_destroy_at"] is not None
+    expected_idle = body["last_activity_at"] + settings.idle_stop_minutes * 60_000
+    expected_hard = body["last_activity_at"] + settings.hard_destroy_hours * 3_600_000
+    assert body["idle_stop_at"] == expected_idle
+    assert body["hard_destroy_at"] == expected_hard
+
+
+def test_idle_stop_at_is_null_for_stopped(authed, settings):
+    """STOPPED sessions still have hard_destroy_at (TTL applies) but
+    no idle_stop_at (the reaper doesn't idle-stop a stopped row)."""
+    sid = authed.post("/v1/sessions", json={}).json()["session_id"]
+    r = authed.post(f"/v1/sessions/{sid}/stop")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "STOPPED"
+    assert body["idle_stop_at"] is None
+    assert body["hard_destroy_at"] is not None
+    expected_hard = body["last_activity_at"] + settings.hard_destroy_hours * 3_600_000
+    assert body["hard_destroy_at"] == expected_hard
+
+
+def test_idle_stop_at_returns_after_resume(authed, settings):
+    """Resuming a STOPPED session brings idle_stop_at back."""
+    sid = authed.post("/v1/sessions", json={}).json()["session_id"]
+    authed.post(f"/v1/sessions/{sid}/stop")
+    r = authed.post(f"/v1/sessions/{sid}/resume")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "RUNNING"
+    assert body["idle_stop_at"] is not None
+
+
+def test_etas_shift_forward_after_activity(authed, settings):
+    """Mutating ops bump last_activity_at; both ETAs shift forward by
+    the same delta (they're derived from last_activity_at)."""
+    sid = authed.post("/v1/sessions", json={}).json()["session_id"]
+    r1 = authed.get(f"/v1/sessions/{sid}")
+    a1 = r1.json()["last_activity_at"]
+    eta1_idle = r1.json()["idle_stop_at"]
+    eta1_hard = r1.json()["hard_destroy_at"]
+
+    # Trigger a mutating op (exec). The fake docker exec defaults to
+    # exit 0 + empty stdout.
+    r_exec = authed.post(f"/v1/sessions/{sid}/exec", json={"argv": ["/bin/true"]})
+    assert r_exec.status_code == 200
+
+    r2 = authed.get(f"/v1/sessions/{sid}")
+    a2 = r2.json()["last_activity_at"]
+    eta2_idle = r2.json()["idle_stop_at"]
+    eta2_hard = r2.json()["hard_destroy_at"]
+
+    # Both ETAs shifted by exactly the activity delta. If
+    # last_activity_at didn't move (unlikely but possible on
+    # sub-millisecond exec), the ETAs shouldn't have moved either.
+    delta = a2 - a1
+    assert eta2_idle - eta1_idle == delta
+    assert eta2_hard - eta1_hard == delta

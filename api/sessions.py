@@ -29,6 +29,25 @@ _TENANT_MAX = {
 }
 
 
+def compute_etas(row: SessionRow, settings: Settings) -> tuple[int | None, int]:
+    """Slice 13b — compute (idle_stop_at, hard_destroy_at) in epoch ms
+    for a session row, given the global TTL settings.
+
+    `idle_stop_at` is the moment the reaper would idle-stop the row
+    absent further activity — populated only when the row is in a
+    status the reaper sweeps for idle-stop (`RUNNING`, `IDLE`).
+    `hard_destroy_at` is always populated; the hard-destroy TTL applies
+    whether the row is RUNNING, IDLE, or STOPPED. Callers compute
+    these on read; the actual reaper decisions live in `api/reaper.py`
+    and use the same arithmetic against the current `last_activity_at`.
+    """
+    idle_stop_at: int | None = None
+    if row.status in ("RUNNING", "IDLE"):
+        idle_stop_at = row.last_activity_at + settings.idle_stop_minutes * 60 * 1000
+    hard_destroy_at = row.last_activity_at + settings.hard_destroy_hours * 60 * 60 * 1000
+    return idle_stop_at, hard_destroy_at
+
+
 class SessionService:
     def __init__(
         self,

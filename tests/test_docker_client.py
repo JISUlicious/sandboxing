@@ -3,8 +3,48 @@
 from unittest.mock import MagicMock, patch
 
 from api.config import Settings
-from api.docker_client import DockerClient, hardening_flags
+from api.docker_client import DockerClient, _parse_docker_iso, hardening_flags
 from api.models import Limits
+
+# ----- _parse_docker_iso (slice 13a) -----
+#
+# Docker is inconsistent across resource kinds:
+# - Containers report `Created` in UTC with `Z` and nanoseconds.
+# - Volumes report `CreatedAt` using the daemon's local timezone
+#   and an explicit offset, without sub-second precision.
+# The integration test on a +09:00 host caught the bug where the
+# original parser silently forced UTC and produced timestamps 9h
+# in the future — age calculations went negative and the reaper
+# treated freshly-created orphans as "under grace".
+
+
+def test_parse_docker_iso_utc_z_with_nanoseconds():
+    """Container-style timestamp: UTC, Z suffix, nanoseconds."""
+    # 2024-05-10T07:39:27 UTC → epoch 1715326767
+    ts = _parse_docker_iso("2024-05-10T07:39:27.123456789Z")
+    assert ts == 1715326767.123456
+
+
+def test_parse_docker_iso_local_offset_no_subsecond():
+    """Volume-style timestamp: local TZ with offset, no nanos.
+    Korea (+09:00) at 13:08:41 is UTC 04:08:41 — they must produce
+    the same epoch."""
+    local = _parse_docker_iso("2024-05-10T13:08:41+09:00")
+    utc_equivalent = _parse_docker_iso("2024-05-10T04:08:41Z")
+    assert local == utc_equivalent
+
+
+def test_parse_docker_iso_naive_treated_as_utc():
+    """Strings without any tz info should be assumed UTC, matching
+    the prior behaviour for the fallback case."""
+    assert _parse_docker_iso("2024-05-10T07:39:27") == _parse_docker_iso("2024-05-10T07:39:27Z")
+
+
+def test_parse_docker_iso_empty_and_garbage():
+    """Empty/garbage strings return 0.0 so the reaper treats them as
+    'very old' — the grace window is then the actual safety knob."""
+    assert _parse_docker_iso("") == 0.0
+    assert _parse_docker_iso("not-an-iso-string") == 0.0
 
 
 def test_hardening_flags_canonical_production():

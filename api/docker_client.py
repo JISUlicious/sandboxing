@@ -52,28 +52,47 @@ def _sh_quote(s: str) -> str:
 def _parse_docker_iso(iso: str) -> float:
     """Parse Docker's ISO-8601 timestamps to epoch seconds.
 
-    Containers carry `Created` (RFC3339 with nanos, e.g.
-    `2024-05-10T07:39:27.123456789Z`); volumes carry `CreatedAt`
-    (without nanos, e.g. `2024-05-10T07:39:27Z`). Both end with `Z`.
-    Returns 0.0 if the string is empty or unparseable — callers
-    treat 0.0 as "very old", which is safe: the grace window
-    means a missing timestamp is conservative (not yet eligible
-    only matters if `Created` is in the future, which it never is).
+    Docker is inconsistent across resource kinds:
+
+    - **Containers** report `Created` in **UTC with the `Z` suffix**,
+      typically with nanosecond precision:
+      `"2024-05-10T07:39:27.123456789Z"`.
+    - **Volumes** report `CreatedAt` using the **daemon's local
+      timezone** and an explicit offset, without sub-second precision:
+      `"2024-05-10T13:08:41+09:00"`.
+
+    Both forms must parse to the correct absolute epoch. Earlier we
+    stripped the `Z` and forced the tz to UTC, which silently
+    misinterpreted volume-side timestamps for daemons not on UTC —
+    age calculations went negative and the reaper skipped them as
+    "under grace".
+
+    Returns 0.0 if the string is empty or unparseable; callers treat
+    0.0 as "very old" so the grace window still gates a safe
+    decision.
     """
     if not iso:
         return 0.0
-    s = iso.rstrip("Z")
-    # Drop sub-second precision if present; fromisoformat in 3.11
-    # rejects nanos.
+    s = iso
+    # fromisoformat (3.11) accepts microseconds (6 digits) but not
+    # nanoseconds (9 digits). Trim any sub-second part to 6 digits.
     if "." in s:
-        head, _, frac = s.partition(".")
-        # Keep only digits, trim to microseconds (6) for fromisoformat.
-        frac_digits = "".join(c for c in frac if c.isdigit())[:6]
-        s = head + ("." + frac_digits if frac_digits else "")
+        dot = s.index(".")
+        end = dot + 1
+        while end < len(s) and s[end].isdigit():
+            end += 1
+        frac = s[dot + 1 : end]
+        if len(frac) > 6:
+            s = s[: dot + 1] + frac[:6] + s[end:]
     try:
         from datetime import datetime
 
-        return datetime.fromisoformat(s).replace(tzinfo=UTC).timestamp()
+        dt = datetime.fromisoformat(s)
+        # If the string lacked tz info, assume UTC. Otherwise preserve
+        # the parsed offset — this is what was broken before.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.timestamp()
     except ValueError:
         return 0.0
 

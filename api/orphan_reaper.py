@@ -9,6 +9,22 @@ the inverse direction — registry rows whose Docker resources are
 gone — but never sees Docker-side leaks because it iterates the
 registry, not Docker.
 
+**SAFETY — pass the real production registry.** This reaper concludes
+a Docker resource is orphaned when `Registry.get_unscoped(session_id)`
+returns None. If you build an `OrphanReaper` against a fresh / empty
+registry (e.g., a tmp_path test fixture) and call `tick()` on a host
+with real labelled containers and volumes, *every* labelled resource
+will look orphaned and the reaper will start destroying real
+production data. The per-tick cap mitigates blast radius but does
+not prevent the loss.
+
+Acceptable construction:
+  - Live service: `OrphanReaper(registry=service.registry, ...)`. Safe.
+  - Integration tests: stub `registry.get_unscoped` to return non-None
+    for any session id you don't own — only the test's own
+    sid should ever be "unknown." See
+    `tests/integration/test_orphan_reaper_real.py` for the pattern.
+
 Two passes per tick, in this order:
 
 1. Containers — `docker ps -a --filter label=sandbox.session_id` →

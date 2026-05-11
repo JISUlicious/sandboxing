@@ -14,6 +14,11 @@ import posixpath
 import time
 from dataclasses import dataclass
 
+# Forward reference for slice 13c; concrete import in TYPE_CHECKING block
+# below avoids a module-load circular if FileService were ever imported
+# before SessionService.
+from typing import TYPE_CHECKING
+
 from fastapi import HTTPException
 
 from api import metrics
@@ -22,6 +27,9 @@ from api.docker_client import DockerClient
 from api.errors import InvalidArgument, InvalidPath, InvalidState, SessionNotFound
 from api.models import FileEntry, FileListResponse, FileWriteRequest
 from api.registry import Registry
+
+if TYPE_CHECKING:
+    from api.sessions import SessionService
 
 log = logging.getLogger("sandbox.files")
 
@@ -67,10 +75,15 @@ class FileService:
         registry: Registry,
         docker: DockerClient,
         audit: AuditEmitter,
+        sessions: SessionService | None = None,
     ) -> None:
         self.registry = registry
         self.docker = docker
         self.audit = audit
+        # Slice 13c — used to bump last_activity_at on writes / reads
+        # / deletes. Optional for back-compat with tests that
+        # construct FileService directly; production always wires it.
+        self._sessions = sessions
 
     async def write(
         self, session_id: str, tenant_id: str, req: FileWriteRequest
@@ -125,13 +138,17 @@ class FileService:
             session=session_id,
             payload={"path": abs_path, "size": len(content), "mode": mode},
         )
+        # Slice 13c — file writes count as activity; bumps last_activity_at
+        # so an actively-used session isn't idle-reaped between writes.
+        if self._sessions is not None:
+            await self._sessions.bump_activity(session_id)
         return {"path": abs_path, "size": len(content), "mode": mode}
 
     async def read(self, session_id: str, tenant_id: str, rel_path: str) -> tuple[bytes, int]:
         session = await self._require_running(session_id, tenant_id)
         abs_path = resolve_workspace_path(rel_path)
         try:
-            return await asyncio.to_thread(
+            content, mode = await asyncio.to_thread(
                 self.docker.get_archive_file,
                 container_id=session.container_id,
                 abs_path=abs_path,
@@ -143,6 +160,13 @@ class FileService:
             ) from exc
         except IsADirectoryError as exc:
             raise InvalidArgument("path is a directory; use list") from exc
+        # Slice 13c — successful file reads count as data consumption,
+        # so we pin. `list_dir` is treated as pure observation and
+        # deliberately doesn't pin (see audit table in
+        # ~/.claude/plans/majestic-wondering-emerson.md).
+        if self._sessions is not None:
+            await self._sessions.bump_activity(session_id)
+        return content, mode
 
     async def list_dir(self, session_id: str, tenant_id: str, rel_dir: str) -> FileListResponse:
         session = await self._require_running(session_id, tenant_id)
@@ -242,6 +266,9 @@ class FileService:
             session=session_id,
             payload={"path": abs_path, "recursive": recursive},
         )
+        # Slice 13c — deletes are mutations; bump activity.
+        if self._sessions is not None:
+            await self._sessions.bump_activity(session_id)
 
     async def _require_running(self, session_id: str, tenant_id: str) -> _Session:
         """Resolve the session, transparently resuming if STOPPED / IDLE.

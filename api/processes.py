@@ -125,6 +125,8 @@ class ProcessService:
             session_id=session_id, process_id=process_id, tenant_id=tenant_id
         )
         assert row is not None
+        # Slice 13c — starting a process is a mutation; pin.
+        await self._sessions.bump_activity(session_id)
         return _row_to_response(row)
 
     async def list(self, *, session_id: str, tenant_id: str) -> list[ProcessResponse]:
@@ -189,6 +191,8 @@ class ProcessService:
             session_id=session_id, tenant_id=tenant_id, process_id=process_id
         )
         await self._registry.delete_process(session_id=session_id, process_id=process_id)
+        # Slice 13c — deleting a background process is a mutation; pin.
+        await self._sessions.bump_activity(session_id)
         return snapshot
 
     async def tail_logs(

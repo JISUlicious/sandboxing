@@ -193,11 +193,19 @@ def create_app(
     settings_ = s or settings
     service_ = service or _build_service(settings_)
     # Slice 2: exec + files share the same registry / docker / audit.
+    # Slice 13c: sessions is also threaded through so the services can
+    # bump_activity on mutations and data-consumption reads.
     exec_service_ = ExecService(
-        registry=service_.registry, docker=service_.docker, audit=service_.audit
+        registry=service_.registry,
+        docker=service_.docker,
+        audit=service_.audit,
+        sessions=service_,
     )
     file_service_ = FileService(
-        registry=service_.registry, docker=service_.docker, audit=service_.audit
+        registry=service_.registry,
+        docker=service_.docker,
+        audit=service_.audit,
+        sessions=service_,
     )
     reaper_ = Reaper(settings=settings_, registry=service_.registry, sessions=service_)
     orphan_reaper_ = OrphanReaper(
@@ -274,6 +282,14 @@ def create_app(
             await reaper_.start()
             await orphan_reaper_.start()
             await sampler_.start()
+        # Slice 13c — surface non-default activity-pin policy in the
+        # audit log so operators can tell which semantic is live.
+        if not settings_.pin_on_activity:
+            await service_.audit.emit(
+                kind="config.pin_policy_non_default",
+                tenant="__system__",
+                payload={"pin_on_activity": False},
+            )
         # Compose the FastMCP session manager into our lifespan so the
         # mounted /mcp endpoint is live for the duration of the app.
         async with mcp_lifespan_context(mcp_):
@@ -1273,6 +1289,11 @@ def create_app(
             from api.errors import ProcessNotFound as _ProcessNotFound
 
             raise _ProcessNotFound(process_id)
+
+        # Slice 13c — opening a log stream is data consumption; pin
+        # activity at stream open so the session isn't reaped while a
+        # long-running log tail is consuming the operator's attention.
+        await service_.bump_activity(session_id)
 
         async def event_iter() -> AsyncIterator[bytes]:
             # Bridge the sync docker-py iterator into asyncio via a

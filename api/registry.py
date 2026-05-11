@@ -355,6 +355,25 @@ class Registry:
                 )
             await db.commit()
 
+    async def touch_activity(self, session_id: str) -> None:
+        """Slice 13c — bump `last_activity_at` to now without changing
+        status. Called by mutating + data-consumption ops so the
+        reaper's `idle_stop_minutes` window reflects actual workload,
+        not just the time since the last state transition.
+
+        Only updates RUNNING/IDLE rows. Touching STOPPED makes no
+        semantic sense (no live container); DESTROYING/DESTROYED is
+        wrong (the row is going away). Idempotent and silent on
+        missing rows."""
+        ts = now_ms()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE sessions SET last_activity_at = ? "
+                "WHERE id = ? AND status IN ('RUNNING', 'IDLE')",
+                (ts, session_id),
+            )
+            await db.commit()
+
     async def get_unscoped(self, session_id: str) -> SessionRow | None:
         """Tenant-agnostic lookup used by the reaper. Returns DESTROYED rows
         too — the reaper consults `status` itself."""

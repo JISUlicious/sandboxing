@@ -593,6 +593,45 @@ that survives across exec calls (dev servers, watchers, training
 jobs). `GET .../processes/{pid}/logs` is an SSE tail. See the
 OpenAPI schema at `/docs` for the full surface.
 
+### Activity-pin policy (slice 13c)
+
+`SANDBOX_PIN_ON_ACTIVITY` (default `true`) controls whether
+mutating ops and data-consumption reads bump
+`last_activity_at` on a RUNNING session, which keeps the reaper's
+`idle_stop_minutes` window from firing while the session is in
+use.
+
+| Op | Pins? | Notes |
+|---|---|---|
+| `POST /v1/sessions/{id}/exec` (and `/exec/stream`) | yes | mutating |
+| `POST /v1/sessions/{id}/files` (and the raw write variant) | yes | mutating |
+| `GET /v1/sessions/{id}/files/{path}` | yes | real data consumption |
+| `DELETE /v1/sessions/{id}/files/{path}` | yes | mutating |
+| `POST /v1/sessions/{id}/processes` | yes | mutating |
+| `DELETE /v1/sessions/{id}/processes/{pid}` | yes | mutating |
+| `GET /v1/sessions/{id}/processes/{pid}/logs` (SSE) | yes (on stream open) | data consumption |
+| `GET /v1/sessions/{id}` | **no** | pure status poll |
+| `GET /v1/sessions/{id}/files` | **no** | listing only |
+| `GET /v1/sessions/{id}/processes` (list) | **no** | listing |
+| `GET /v1/sessions/{id}/processes/{pid}` (single) | **no** | status poll |
+
+Before slice 13c, `last_activity_at` was bumped only by **state
+transitions** (create / stop / resume / auto-resume). On a stable
+RUNNING session, no op bumped it — so the reaper would idle-stop
+the session after `idle_stop_minutes` from create, regardless of
+workload. The next op auto-resumed transparently, but it churned
+the container and added resume latency.
+
+To revert to the pre-13c semantic, set
+`SANDBOX_PIN_ON_ACTIVITY=false` in `/etc/sandbox/env` and
+restart. When the flag is non-default, the service emits a
+startup audit record with `kind="config.pin_policy_non_default"`
+so the active policy is visible in the log.
+
+The hard-destroy ceiling (`SANDBOX_HARD_DESTROY_HOURS`, default
+24) still applies regardless of the flag, so sessions can't live
+forever even with continuous pinning.
+
 ### Upgrades
 
 Releases publish new images at `ghcr.io/JISUlicious/sandbox-{...}:<tag>`

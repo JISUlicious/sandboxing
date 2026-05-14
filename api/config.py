@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     idle_stop_minutes: int = 15
     hard_destroy_hours: int = 24
     reaper_interval_s: int = 60
+    # Slice 13c — activity pinning. When True (default), mutating
+    # ops (exec, file write/read/delete, process start/delete,
+    # log-stream open) bump `last_activity_at` so a busy RUNNING
+    # session stays alive across the idle_stop_minutes window.
+    # When False, only state transitions bump activity (the
+    # pre-13c semantic, where active sessions get implicitly
+    # idle-stopped after N minutes from create and auto-resumed
+    # on the next op). Hard-destroy TTL applies regardless.
+    pin_on_activity: bool = True
     # SPEC-501 — per-session cpu/mem/blkio samples. Set to 0 to disable.
     resource_sample_interval_s: int = 10
 

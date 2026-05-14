@@ -85,6 +85,17 @@ class SessionService:
                 self._locks[session_id] = lock
             return lock
 
+    async def bump_activity(self, session_id: str) -> None:
+        """Slice 13c — flag-aware wrapper around registry.touch_activity.
+        Mutating + data-consumption ops in ExecService / FileService /
+        ProcessService call this so a busy session keeps itself alive
+        across idle_stop_minutes. The pre-13c semantic
+        (status-transitions are the only thing that bump activity)
+        is preserved by `SANDBOX_PIN_ON_ACTIVITY=false`."""
+        if not self.settings.pin_on_activity:
+            return
+        await self.registry.touch_activity(session_id)
+
     # ----- public API -----
 
     async def create(self, tenant_id: str, limits: Limits | None) -> SessionRow:

@@ -21,6 +21,7 @@ from api.docker_client import (
 from api.errors import ExecTimeout, InvalidArgument, InvalidState, SessionNotFound
 from api.models import ExecRequest, ExecResponse
 from api.registry import Registry, SessionRow
+from api.sessions import SessionService
 
 log = logging.getLogger("sandbox.exec")
 
@@ -41,10 +42,15 @@ class ExecService:
         registry: Registry,
         docker: DockerClient,
         audit: AuditEmitter,
+        sessions: SessionService | None = None,
     ) -> None:
         self.registry = registry
         self.docker = docker
         self.audit = audit
+        # Slice 13c — used to bump last_activity_at on successful
+        # exec / stream. Optional for back-compat with tests that
+        # construct ExecService directly; production always wires it.
+        self._sessions = sessions
 
     # ----- non-streaming -----
 
@@ -81,6 +87,12 @@ class ExecService:
 
         result_label = "timeout" if out.exit_code == TIMEOUT_EXIT_CODE else "ok"
         metrics.exec_duration_seconds.labels(result=result_label).observe(out.duration_ms / 1000.0)
+
+        # Slice 13c — bump activity AFTER audit emit so a crashing
+        # emit doesn't leave a phantom "activity happened but not
+        # logged" hole. Timeout still counts as activity.
+        if self._sessions is not None:
+            await self._sessions.bump_activity(session_id)
 
         if out.exit_code == TIMEOUT_EXIT_CODE:
             raise ExecTimeout()
@@ -122,6 +134,14 @@ class ExecService:
         timeout_s = self._effective_timeout(req, session)
         env = req.env or {}
         assert session.container_id is not None
+
+        # Slice 13c — bump activity at stream START so a long-running
+        # stream pins the session against idle-stop during the run.
+        # The reaper's idle window is wall-clock from last_activity_at;
+        # waiting until stream end would let a session that started a
+        # 30-minute exec get reaped mid-stream.
+        if self._sessions is not None:
+            await self._sessions.bump_activity(session_id)
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[tuple[str, bytes | int] | None] = asyncio.Queue()

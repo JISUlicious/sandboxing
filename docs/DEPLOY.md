@@ -752,6 +752,22 @@ docker build -f Dockerfile.control-plane \
 docker compose --env-file /etc/sandbox/env up -d
 ```
 
+For the **data-science image**, build the `-ds` variant from
+`sandbox/ds/` instead of (or alongside) the minimal runtime, and
+set `SANDBOX_SANDBOX_IMAGE` to match before `up`:
+
+```bash
+docker build -t ghcr.io/jisulicious/sandbox-runtime-ds:latest sandbox/ds/
+echo 'SANDBOX_SANDBOX_IMAGE=ghcr.io/jisulicious/sandbox-runtime-ds:latest' \
+    | sudo tee -a /etc/sandbox/env
+docker compose --env-file /etc/sandbox/env up -d --force-recreate
+```
+
+The `-ds` build pulls ~5–7 GiB of pinned packages; allow several
+minutes the first time. See
+[`sandbox/ds/README.md`](../sandbox/ds/README.md) for the full
+package list and the smoke tests baked into `/opt/ds/`.
+
 Compose's default `pull_policy=missing` finds the locally-built
 images and skips the pull. Forks publishing under a different
 namespace can override via `SANDBOX_IMAGE_NAMESPACE` in

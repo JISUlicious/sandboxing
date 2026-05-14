@@ -121,10 +121,24 @@ For forks, air-gapped deploys, or local development of the runtime
 images:
 
 ```bash
-docker build -t sandbox-runtime:latest sandbox/                            # per-session container
+docker build -t sandbox-runtime:latest sandbox/                            # per-session container (minimal)
 docker build -t sandbox-proxy:latest   proxy/                              # Squid egress proxy
 docker build -f Dockerfile.control-plane -t sandbox-control-plane:latest . # FastAPI control plane
 ```
+
+For data-science / ML / document-generation workloads, build the
+`-ds` variant instead of (or alongside) the minimal `sandbox-runtime`:
+
+```bash
+docker build -t sandbox-runtime-ds:latest sandbox/ds/   # ~5–7 GiB; pandas + sklearn + xgboost + …
+```
+
+See [`sandbox/ds/README.md`](./sandbox/ds/README.md) for the full
+package manifest, smoke tests, and "what's NOT inside." Operators
+point sessions at the DS image by setting
+`SANDBOX_SANDBOX_IMAGE=sandbox-runtime-ds:latest` in
+`/etc/sandbox/env` (see
+[docs/DEPLOY.md "Choosing the runtime image"](./docs/DEPLOY.md#choosing-the-runtime-image)).
 
 Tag them under your own namespace (or `ghcr.io/jisulicious/...` if
 you want to override the upstream `:latest`) before `docker compose

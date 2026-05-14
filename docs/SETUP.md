@@ -80,7 +80,11 @@ uv installs its own Python; no system Python needed.
 git clone <your-fork-url> sandboxing
 cd sandboxing
 uv sync --extra dev
-docker build -t sandbox-runtime:latest sandbox/
+docker build -t sandbox-runtime:latest sandbox/    # minimal; ~150 MiB
+# For data-science / ML workloads, build the heavier variant instead
+# (or alongside) and point the service at it with
+# SANDBOX_SANDBOX_IMAGE=sandbox-runtime-ds:latest:
+#   docker build -t sandbox-runtime-ds:latest sandbox/ds/    # ~5–7 GiB
 SANDBOX_DEV_MODE=1 SANDBOX_API_TOKEN=dev-token \
     uv run uvicorn api.server:app --host 127.0.0.1 --port 8000
 ```

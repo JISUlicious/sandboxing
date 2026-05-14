@@ -57,7 +57,7 @@ from api.processes import ProcessService
 from api.reaper import Reaper
 from api.registry import Registry, SessionRow
 from api.sampler import SessionSampler
-from api.sessions import SessionService
+from api.sessions import SessionService, compute_etas
 
 logging.basicConfig(
     level=logging.INFO,
@@ -173,7 +173,8 @@ def _build_service(s: Settings) -> SessionService:
     )
 
 
-def _to_response(row: SessionRow) -> SessionResponse:
+def _to_response(row: SessionRow, settings_: Settings) -> SessionResponse:
+    idle_stop_at, hard_destroy_at = compute_etas(row, settings_)
     return SessionResponse(
         session_id=row.id,
         status=row.status,
@@ -181,6 +182,8 @@ def _to_response(row: SessionRow) -> SessionResponse:
         limits=row.limits,
         created_at=row.created_at,
         last_activity_at=row.last_activity_at,
+        idle_stop_at=idle_stop_at,
+        hard_destroy_at=hard_destroy_at,
     )
 
 
@@ -530,7 +533,7 @@ def create_app(
     async def create_session(
         req: CreateSessionRequest, tenant: str = Depends(require_scope("session_create"))
     ) -> SessionResponse:
-        return _to_response(await service_.create(tenant, req.limits))
+        return _to_response(await service_.create(tenant, req.limits), settings_)
 
     @app.get(
         "/v1/sessions/{session_id}",
@@ -540,7 +543,7 @@ def create_app(
         responses={**ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION},
     )
     async def get_session(session_id: str, tenant: str = Depends(auth)) -> SessionResponse:
-        return _to_response(await service_.get(session_id, tenant))
+        return _to_response(await service_.get(session_id, tenant), settings_)
 
     @app.post(
         "/v1/sessions/{session_id}/stop",
@@ -555,7 +558,7 @@ def create_app(
         responses={**ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION, **ERR_CONFLICT},
     )
     async def stop_session(session_id: str, tenant: str = Depends(auth)) -> SessionResponse:
-        return _to_response(await service_.stop(session_id, tenant))
+        return _to_response(await service_.stop(session_id, tenant), settings_)
 
     @app.post(
         "/v1/sessions/{session_id}/resume",
@@ -570,7 +573,7 @@ def create_app(
         responses={**ERR_UNAUTHORIZED, **ERR_NOT_FOUND_SESSION, **ERR_CONFLICT},
     )
     async def resume_session(session_id: str, tenant: str = Depends(auth)) -> SessionResponse:
-        return _to_response(await service_.resume(session_id, tenant))
+        return _to_response(await service_.resume(session_id, tenant), settings_)
 
     @app.delete(
         "/v1/sessions/{session_id}",

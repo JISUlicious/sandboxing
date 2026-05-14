@@ -101,12 +101,18 @@ curl -s $BASE/metrics | head -3   # # HELP / # TYPE Prometheus header
 SID=$(api -d '{}' $BASE/v1/sessions | jq -r .session_id)
 echo "session: $SID"
 
-# Inspect it.
-api $BASE/v1/sessions/$SID | jq '{status, limits}'
+# Inspect it. Every response includes `idle_stop_at` (epoch ms when
+# the reaper would idle-stop absent further activity; null for
+# already-STOPPED rows) and `hard_destroy_at` (epoch ms when the
+# session would be hard-destroyed: container + workspace volume
+# both removed, irreversible). Both shift forward with every
+# mutating op (exec, file write, process start, etc.).
+api $BASE/v1/sessions/$SID | jq '{status, limits, idle_stop_at, hard_destroy_at}'
 
-# Stop / resume (filesystem survives both).
-api -X POST $BASE/v1/sessions/$SID/stop   | jq .status   # "STOPPED"
-api -X POST $BASE/v1/sessions/$SID/resume | jq .status   # "RUNNING"
+# Stop / resume (filesystem survives both). idle_stop_at becomes null
+# when STOPPED and reappears on resume; hard_destroy_at stays set.
+api -X POST $BASE/v1/sessions/$SID/stop   | jq '{status, idle_stop_at}'   # "STOPPED", null
+api -X POST $BASE/v1/sessions/$SID/resume | jq '{status, idle_stop_at}'   # "RUNNING", <epoch>
 
 # Destroy at the end.
 api -X DELETE $BASE/v1/sessions/$SID -o /dev/null -w "%{http_code}\n"  # 204

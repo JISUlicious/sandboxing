@@ -51,11 +51,15 @@ log = logging.getLogger("sandbox.mcp")
 _current_tenant: ContextVar[str] = ContextVar("sandbox_mcp_tenant_id")
 
 
-def _row_to_response(row: SessionRow) -> SessionResponse:
+def _row_to_response(row: SessionRow, sessions: SessionService) -> SessionResponse:
     """Mirror of `api.server._to_response`. Duplicated here to keep
     the import direction one-way (mcp_server imports from server-
     adjacent modules but server imports from mcp_server, not the
-    other way around)."""
+    other way around). Slice 13b — pulls TTL settings from the
+    SessionService that's already in scope to compute ETAs."""
+    from api.sessions import compute_etas
+
+    idle_stop_at, hard_destroy_at = compute_etas(row, sessions.settings)
     return SessionResponse(
         session_id=row.id,
         status=row.status,
@@ -63,6 +67,8 @@ def _row_to_response(row: SessionRow) -> SessionResponse:
         limits=row.limits,
         created_at=row.created_at,
         last_activity_at=row.last_activity_at,
+        idle_stop_at=idle_stop_at,
+        hard_destroy_at=hard_destroy_at,
     )
 
 
@@ -184,7 +190,7 @@ def build_mcp(
             row = await sessions.create(_tenant_id(), limits)
         except SandboxError as exc:
             raise _surface_error(exc) from exc
-        return _row_to_response(row)
+        return _row_to_response(row, sessions)
 
     @mcp.tool(
         name="session_get",
@@ -195,7 +201,7 @@ def build_mcp(
             row = await sessions.get(session_id, _tenant_id())
         except SandboxError as exc:
             raise _surface_error(exc) from exc
-        return _row_to_response(row)
+        return _row_to_response(row, sessions)
 
     @mcp.tool(
         name="session_stop",
@@ -209,7 +215,7 @@ def build_mcp(
             row = await sessions.stop(session_id, _tenant_id())
         except SandboxError as exc:
             raise _surface_error(exc) from exc
-        return _row_to_response(row)
+        return _row_to_response(row, sessions)
 
     @mcp.tool(
         name="session_resume",
@@ -223,7 +229,7 @@ def build_mcp(
             row = await sessions.resume(session_id, _tenant_id())
         except SandboxError as exc:
             raise _surface_error(exc) from exc
-        return _row_to_response(row)
+        return _row_to_response(row, sessions)
 
     @mcp.tool(
         name="session_destroy",

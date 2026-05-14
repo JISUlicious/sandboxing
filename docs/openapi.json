@@ -610,6 +610,23 @@
             "title": "Created At",
             "type": "integer"
           },
+          "hard_destroy_at": {
+            "description": "Epoch milliseconds when, absent further activity, the session will be hard-destroyed: container removed AND `/workspace` volume removed. Irreversible. Bumped forward by mutating ops on the session. The hard-destroy clock applies to every non-terminal session, including `STOPPED` ones.",
+            "title": "Hard Destroy At",
+            "type": "integer"
+          },
+          "idle_stop_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Epoch milliseconds when, absent further activity, the session will be idle-stopped: container removed but `/workspace` volume retained, session resumable via `/exec` or any file/process op. `null` when the session is in a status not subject to idle-stop (`STOPPED`, `DESTROYING`, `DESTROYED`, `CREATING`). Bumped forward by mutating ops on the session.",
+            "title": "Idle Stop At"
+          },
           "last_activity_at": {
             "title": "Last Activity At",
             "type": "integer"
@@ -644,7 +661,8 @@
           "tenant_id",
           "limits",
           "created_at",
-          "last_activity_at"
+          "last_activity_at",
+          "hard_destroy_at"
         ],
         "title": "SessionResponse",
         "type": "object"

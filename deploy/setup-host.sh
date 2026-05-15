@@ -478,9 +478,36 @@ if (( FULL )); then
             skip "$XFS_MOUNT already mounted"
         else
             run install -d -m 0755 "$XFS_MOUNT"
+            # Validate the existing image before trusting it. The original
+            # check ("file exists → skip mkfs") let a half-built image
+            # poison every subsequent re-run: a previous mkfs.xfs failure
+            # (silent under -q) leaves a 50 GiB sparse file that isn't a
+            # valid XFS superblock, and the mount step then fails with
+            # the cryptic "wrong fs type, bad option, bad superblock" —
+            # which says nothing about *why*. `file -bL` distinguishes
+            # "SGI XFS filesystem data" (real) from "data" (poison-pill).
+            needs_mkfs=0
             if [[ ! -f $XFS_IMG ]]; then
+                needs_mkfs=1
+            elif ! file -bL "$XFS_IMG" 2>/dev/null | grep -q "XFS filesystem"; then
+                fail "$XFS_IMG exists but has no XFS superblock — likely a"
+                fail "previous mkfs.xfs failure. Removing and re-formatting."
+                run rm -f "$XFS_IMG"
+                needs_mkfs=1
+            fi
+            if (( needs_mkfs )); then
                 run truncate -s "${XFS_SIZE_GB}G" "$XFS_IMG"
-                run mkfs.xfs -q "$XFS_IMG"
+                # No `-q`: surface real errors to the operator. mkfs.xfs
+                # under -q swallowed the original failure that led to
+                # this validation in the first place.
+                run mkfs.xfs "$XFS_IMG"
+                # Belt-and-suspenders: confirm the format actually stuck.
+                if ! file -bL "$XFS_IMG" 2>/dev/null | grep -q "XFS filesystem"; then
+                    fail "$XFS_IMG: mkfs.xfs reported success but file is not XFS"
+                    fail "check 'dmesg | grep -i xfs' and that the xfsprogs package"
+                    fail "matches the running kernel's XFS module."
+                    exit 1
+                fi
                 ok "created $XFS_IMG ($XFS_SIZE_GB GiB)"
             fi
             # Persist the mount via /etc/fstab so reboots restore it.

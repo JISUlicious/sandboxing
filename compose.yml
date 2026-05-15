@@ -122,8 +122,12 @@ services:
       SANDBOX_QUOTA_VOLUME_BASE: "${SANDBOX_VOLUME_BASE:-/var/lib/sandbox-volumes}"
     ports:
       # SPEC-302: bind to host loopback only. Reverse-proxy in front
-      # of this for remote / TLS-terminated access.
-      - "127.0.0.1:8000:8000"
+      # of this for remote / TLS-terminated access. Host-side port
+      # is overridable via SANDBOX_HOST_PORT in /etc/sandbox/env for
+      # hosts where 8000 is already taken. The container-internal
+      # port stays 8000 (healthcheck and internal references depend
+      # on it).
+      - "127.0.0.1:${SANDBOX_HOST_PORT:-8000}:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /var/lib/sandbox:/var/lib/sandbox

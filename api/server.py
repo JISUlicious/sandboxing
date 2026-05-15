@@ -307,7 +307,7 @@ def create_app(
         title="Sandbox Service",
         # Track the release tag. Bump on every spec-affecting change so
         # consumers pinned against an older version can detect drift.
-        version="0.2.9",
+        version="0.3.0",
         description=API_DESCRIPTION,
         openapi_tags=TAGS_METADATA,
         lifespan=lifespan,
